@@ -368,8 +368,8 @@ def build_tool_system_prompt(tools: list) -> str:
 **CRITICAL: Output ONLY the XML tag. Start with <. No text before. No text after. VIOLATION = FAILURE.**
 
 **TIPS for finding files/projects:**
-- If looking for a project/directory, use: find ~ -maxdepth 3 -type d -iname '*NAME*' 2>/dev/null
-- If looking for a file, use: find ~ -maxdepth 4 -type f -iname '*NAME*' 2>/dev/null
+- If looking for a project/directory, use: find /home/vps2 -maxdepth 3 -type d -iname '*NAME*' 2>/dev/null
+- If looking for a file, use: find /home/vps2 -maxdepth 4 -type f -iname '*NAME*' 2>/dev/null
 - Always search broadly first, then narrow down.
 
 <write>
@@ -512,7 +512,7 @@ def make_tool_call_chunk(completion_id: str, model: str,
 # ============================================================
 
 def _do_deepseek_call(token: str, prompt: str, model: str,
-                      thinking_enabled: bool, stream_yield: bool = False):
+                      thinking_enabled: bool):
     """Call DeepSeek and collect full response text. Returns dict with text and metadata."""
     sess = make_session()
     session_id = None
@@ -566,15 +566,77 @@ def _do_deepseek_call(token: str, prompt: str, model: str,
                 if isinstance(v, str) and "content" in p:
                     full_text += v  # Keep everything, filter later
 
-        if stream_yield:
-            yield ("done", full_text)
-        else:
-            return {"text": full_text, "finish_reason": "stop"}
+        return {"text": full_text, "finish_reason": "stop"}
 
     finally:
         pass  # Keep session for history
 
 
+
+def _stream_deepseek_realtime(token: str, prompt: str, model: str,
+                               thinking_enabled: bool, completion_id: str):
+    """Real streaming: yield each token as it arrives from DeepSeek."""
+    sess = make_session()
+    session_id = None
+    msg_id = 0
+    last_status = ""
+    full_text = ""
+    
+    try:
+        session_id = create_session(token, session=sess)
+        pow_resp = get_pow(token, session=sess)
+
+        lines = call_completion(
+            token=token, session_id=session_id, prompt=prompt,
+            model=model, thinking=thinking_enabled,
+            pow_response=pow_resp, http_session=sess,
+        )
+
+        for chunk in parse_sse_lines(lines):
+            if chunk.get("response_message_id"):
+                msg_id = int(chunk["response_message_id"])
+
+            p = chunk.get("p", "")
+            v = chunk.get("v")
+
+            if "status" in p and isinstance(v, str):
+                last_status = v
+            if "auto_continue" in p and v is True:
+                last_status = "AUTO_CONTINUE"
+
+            if isinstance(v, str) and "content" in p:
+                full_text += v
+                yield ("token", v)
+
+        # Auto-continue
+        for rnd in range(8):
+            if last_status.upper() not in ("INCOMPLETE", "AUTO_CONTINUE"):
+                break
+            if msg_id <= 0:
+                break
+            log.info(f"auto_continue round {rnd+1}, msg_id={msg_id}")
+            pow2 = get_pow(token, session=sess)
+            cont = call_continue(token, session_id, msg_id,
+                                 pow_response=pow2, http_session=sess)
+            last_status = ""
+            for chunk in parse_sse_lines(cont):
+                if chunk.get("response_message_id"):
+                    msg_id = int(chunk["response_message_id"])
+                p = chunk.get("p", "")
+                v = chunk.get("v")
+                if "status" in p and isinstance(v, str):
+                    last_status = v
+                if isinstance(v, str) and "content" in p:
+                    full_text += v
+                    yield ("token", v)
+
+        yield ("done", full_text)
+
+    except Exception as e:
+        invalidate_token(token)
+        yield ("error", str(e))
+    finally:
+        pass
 
 def _yield_text_stream(completion_id: str, model: str, text: str):
     """Yield text as SSE stream chunks."""
@@ -634,11 +696,11 @@ def stream_with_tools(token: str, msgs: list, model: str,
         yield make_chunk(completion_id, model, {}, finish_reason="tool_calls")
         yield "data: [DONE]\n\n"
     elif not tools:
-        # No tools needed - use real-time streaming
+        # No tools needed - use real streaming
         log.info(f"Real-time streaming (no tools)")
         try:
             yield make_chunk(completion_id, model, {"role": "assistant", "content": ""})
-            for typ, val in _do_deepseek_call(token, prompt, model, thinking_enabled, stream_yield=True):
+            for typ, val in _stream_deepseek_realtime(token, prompt, model, thinking_enabled, completion_id):
                 if typ == "token":
                     yield make_chunk(completion_id, model, {"content": val})
                 elif typ == "error":
@@ -648,7 +710,7 @@ def stream_with_tools(token: str, msgs: list, model: str,
             yield make_chunk(completion_id, model, {}, finish_reason="stop")
             yield "data: [DONE]\n\n"
         except Exception as e:
-            log.error(f"Stream error: {e}")
+            invalidate_token(token)
             err = {"error": {"type": "api_error", "message": str(e)}}
             yield f"data: {json.dumps(err)}\n\n"
         return
