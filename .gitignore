@@ -1,0 +1,8 @@
+.env
+data/
+__pycache__/
+*.pyc
+server_old.py
+server_tmp.py
+server.log
+.DS_Store
