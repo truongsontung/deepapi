@@ -575,24 +575,72 @@ class BrowserSession:
 
 
 # ============================================================
-# GLOBAL SESSION POOL (đơn giản: 1 session)
+# BROWSER POOL (multiple browser instances)
 # ============================================================
 
-_default_session: BrowserSession = None
-_session_lock = threading.Lock()
+POOL_SIZE = 3
+_pool: list = []
+_pool_lock = threading.Lock()
+_pool_available = threading.Semaphore(0)
+
+class BrowserPool:
+    """Pool of BrowserSession instances for concurrent use."""
+    
+    @staticmethod
+    def init():
+        with _pool_lock:
+            if not _pool:
+                print(f"[browser] Khởi tạo pool {POOL_SIZE} browser...")
+                for i in range(POOL_SIZE):
+                    try:
+                        bs = BrowserSession()
+                        _pool.append(bs)
+                        print(f"[browser] Instance {i+1}/{POOL_SIZE} sẵn sàng")
+                    except Exception as e:
+                        print(f"[browser] Instance {i+1} lỗi: {e}")
+                for _ in range(len(_pool)):
+                    _pool_available.release()
+                print(f"[browser] Pool sẵn sàng: {len(_pool)}/{POOL_SIZE}")
+    
+    @staticmethod
+    def acquire(timeout: float = 30) -> BrowserSession:
+        if not _pool_available.acquire(timeout=timeout):
+            raise RuntimeError("Browser pool timeout - no available browser")
+        with _pool_lock:
+            if not _pool:
+                _pool_available.release()
+                raise RuntimeError("Browser pool empty")
+            bs = _pool.pop()
+        # Health check: if browser seems dead, recreate
+        try:
+            if bs._worker is None or not bs._worker.is_alive():
+                print("[browser] Worker dead, recreating...")
+                bs = BrowserSession()
+        except:
+            pass
+        return bs
+    
+    @staticmethod
+    def release(bs: BrowserSession):
+        with _pool_lock:
+            _pool.append(bs)
+        _pool_available.release()
+
+# Start pool on import
+_pool_init_thread = threading.Thread(target=BrowserPool.init, daemon=True)
+_pool_init_thread.start()
 
 def get_default_session() -> BrowserSession:
-    global _default_session
-    with _session_lock:
-        if _default_session is None:
-            print("[browser] Khởi tạo browser session...")
-            _default_session = BrowserSession()
-            print("[browser] Sẵn sàng.")
-        return _default_session
+    """Get browser from pool (blocking with timeout)"""
+    return BrowserPool.acquire()
 
 def make_session() -> BrowserSession:
-    """Alias để tương thích với code cũ"""
+    """Get browser from pool"""
     return get_default_session()
+
+def return_session(bs: BrowserSession):
+    """Return browser to pool after use"""
+    BrowserPool.release(bs)
 
 
 # ============================================================
