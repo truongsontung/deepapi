@@ -597,18 +597,6 @@ def stream_with_tools(token: str, msgs: list, model: str,
     
     parsed = _extract_xml_tags(text)
     
-    # Retry if tools requested but no XML found
-    retry = 0
-    while not parsed and tools and retry < 2:
-        retry += 1
-        log.info(f"No tool calls, retry {retry}/2")
-        try:
-            result = _do_deepseek_call(token, prompt + "\n\nAssistant:", model, thinking_enabled)
-            text = result.get("text", "")
-            parsed = _extract_xml_tags(text)
-        except:
-            break
-
     if parsed and tools:
         # Filter thinking from display text but keep tool calls
         log.info(f"Tool calls: {[t['name'] for t in parsed]}")
