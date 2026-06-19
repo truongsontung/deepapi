@@ -600,18 +600,22 @@ def stream_with_tools(token: str, msgs: list, model: str,
     if parsed and tools:
         # Filter thinking from display text but keep tool calls
         log.info(f"Tool calls: {[t['name'] for t in parsed]}")
-        # Stream role first (no content)
-        yield make_chunk(completion_id, model, {"role": "assistant", "content": None})
-        # Stream each tool call in OpenAI format
+        # Stream tool calls in proper OpenAI format
+        # Chunk 1: role + tool call declaration (OpenAI puts them together)
+        tc_deltas = []
         for i, tc in enumerate(parsed):
             cid = f"call_{uuid.uuid4().hex[:12]}"
-            args = json.dumps(tc["arguments"], ensure_ascii=False)
-            # Chunk 1: tool call declaration
-            yield make_chunk(completion_id, model, {
-                "tool_calls": [{"index": i, "id": cid, "type": "function",
-                                "function": {"name": tc["name"], "arguments": ""}}]
+            tc_deltas.append({
+                "index": i, "id": cid, "type": "function",
+                "function": {"name": tc["name"], "arguments": ""}
             })
-            # Chunk 2: arguments
+        yield make_chunk(completion_id, model, {
+            "role": "assistant", "content": None,
+            "tool_calls": tc_deltas
+        })
+        # Chunk 2-N: stream arguments for each tool call
+        for i, tc in enumerate(parsed):
+            args = json.dumps(tc["arguments"], ensure_ascii=False)
             yield make_chunk(completion_id, model, {
                 "tool_calls": [{"index": i, "function": {"arguments": args}}]
             })
