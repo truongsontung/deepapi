@@ -441,7 +441,14 @@ def build_prompt(messages: list, tools: list = None) -> str:
         if tool_prompt:
             parts.insert(0, f"<system>\n{tool_prompt}\n</system>")
 
-    parts.append("Assistant:" + (" <" if tools else ""))  # Force XML only when tools
+    # Only force XML start on first tool request (no tool results in history yet)
+    has_tool_results = any(
+        msg.get("role") == "tool" or
+        (msg.get("role") == "assistant" and msg.get("tool_calls"))
+        for msg in messages
+    )
+    suffix = " <" if (tools and not has_tool_results) else ""
+    parts.append(f"Assistant:{suffix}")  # Force XML only on first tool call
     return "\n\n".join(parts)
 
 
