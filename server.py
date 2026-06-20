@@ -121,6 +121,7 @@ _current_account_index = 0
 
 
 def prelogin_all_accounts():
+    threading.Thread(target=_token_refresh_loop, daemon=True).start()
     """Login all accounts in background at startup to avoid first-request timeout."""
     def _login_all():
         for i, acc in enumerate(ACCOUNTS):
@@ -134,6 +135,22 @@ def prelogin_all_accounts():
             except Exception as e:
                 print(f"[auth] Pre-login loi #{i+1} ({acc.get('email')}): {e}")
     threading.Thread(target=_login_all, daemon=True).start()
+
+def _token_refresh_loop():
+    """Background thread: refresh all tokens every 10 minutes."""
+    import time as _time
+    while True:
+        _time.sleep(600)
+        print("[auth] Refreshing all tokens...")
+        for i, acc in enumerate(ACCOUNTS):
+            try:
+                token = login(email=acc.get("email"), password=acc.get("password"))
+                with _account_lock:
+                    acc["token"] = token
+                print(f"[auth] Refresh OK #{i+1}: {token[:20]}...")
+            except Exception as e:
+                print(f"[auth] Refresh fail #{i+1} ({acc.get(email)}): {e}")
+        print("[auth] Token refresh complete")
 
 def get_active_token() -> str:
     global _current_account_index
@@ -797,6 +814,7 @@ if __name__ == "__main__":
     print("=" * 50)
     print("[info] Khởi động trình duyệt và đăng nhập DeepSeek tự động trong nền...")
     prelogin_all_accounts()
+    threading.Thread(target=_token_refresh_loop, daemon=True).start()
     print("=" * 50)
 
     # Flask threaded=True: mỗi request chạy trong thread riêng
