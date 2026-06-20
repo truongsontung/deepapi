@@ -462,7 +462,7 @@ def stream_generator(token: str, prompt: str, model: str,
 
                 if isinstance(v, str) and "content" in p:
                     if "thinking" in p.lower():
-                        yield make_chunk(completion_id, model, {"content": v})
+                        yield make_chunk(completion_id, model, {"reasoning_content": v})
                     else:
                         yield make_chunk(completion_id, model, {"content": v})
 
@@ -541,6 +541,11 @@ def stream_with_tools(token: str, msgs: list, model: str,
     text = result.get("text", "")
     tool_calls = _extract_xml_tags(text)
 
+    # Stream reasoning_content if present
+    thinking_text = result.get("thinking", "")
+    if thinking_text:
+        yield make_chunk(completion_id, model, {"role": "assistant", "reasoning_content": thinking_text})
+
     if tool_calls:
         for i, tc in enumerate(tool_calls):
             cid = f"call_{uuid.uuid4().hex[:12]}"
@@ -609,7 +614,7 @@ def chat_completions():
         return jsonify({"error": {"message": "messages required"}}), 400
 
     thinking_enabled = bool(thinking_flag) if thinking_flag is not None \
-                       else (get_model_type(model) == "reasoner")
+                       else (get_model_type(model) in ("reasoner", "expert"))
 
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
 
@@ -701,7 +706,7 @@ def chat_completions():
         resp["choices"][0]["message"]["tool_calls"] = openai_tc
 
     if result.get("thinking"):
-        resp["choices"][0]["message"]["thinking"] = result["thinking"]
+        resp["choices"][0]["message"]["reasoning_content"] = result["thinking"]
 
     return jsonify(resp)
 
