@@ -276,7 +276,23 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
-    # Format 2 (legacy): <function_call name="X"><args>JSON</args></function_call>
+    # Format 2: <tool><name>X</name><json>{...}</json></tool>
+    tool_nested_pattern = re.compile(
+        r"<tool>\s*<name>\s*(\w+)\s*</name>\s*<json>(.*?)</json>\s*</tool>",
+        re.DOTALL
+    )
+    for match in tool_nested_pattern.finditer(text):
+        tool_name = match.group(1)
+        args_str = match.group(2).strip()
+        try:
+            args = json.loads(args_str)
+        except json.JSONDecodeError:
+            args = {}
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+    
+    # Format 3 (legacy): <function_call name="X"><args>JSON</args></function_call>
     fc_pattern = re.compile(
         r'<function_call\s+name\s*=\s*"(\w+)"\s*>\s*'
         r'<args>(.*?)</args>\s*'
@@ -298,6 +314,7 @@ def strip_tool_calls(text: str) -> str:
     text = re.sub(r"<tool>\s*<name>\s*\w+\s*</name>\s*<json>.*?</json>\s*</tool>", "", text, flags=re.DOTALL)
     """Remove tool call XML blocks from text."""
     text = re.sub(r'<tool>\s*\w+\s*</tool>\s*<json>.*?</json>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<tool>\s*<name>\s*\w+\s*</name>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
     text = re.sub(r'<function_call\s+name\s*=\s*"[^"]*"\s*>.*?</function_call>', '', text, flags=re.DOTALL)
     return text.strip()
 
@@ -715,6 +732,12 @@ def chat_completions():
 
     thinking_enabled = bool(thinking_flag) if thinking_flag is not None \
                        else (get_model_type(model) in ("reasoner", "expert"))
+    # Nếu system prompt yêu cầu JSON (skill matching) -> tắt thinking để tránh reasoning lẫn vào
+    if not thinking_flag:
+        for m in msgs:
+            if m.get("role") == "system" and ("Response in JSON format" in str(m.get("content","")) or "skillNames" in str(m.get("content",""))):
+                thinking_enabled = False
+                break
 
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
 
