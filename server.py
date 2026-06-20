@@ -238,7 +238,9 @@ def require_auth():
 def _extract_xml_tags(text: str) -> list:
     """Parse tool call XML from text. Supports:
     1. <tool>name</tool><json>{...}</json>
-    2. <function_call name="X"><args>JSON</args></function_call> (legacy)
+    1. <tool>name</tool><json>{...}</json>
+    2. <tool><name>X</name><json>{...}</json></tool>
+    3. <function_call name="X"><args>JSON</args></function_call> (legacy)
     """
     tools = []
     
@@ -258,6 +260,22 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
     
+    # Format 2: <tool><name>X</name><json>{...}</json></tool>
+    tool_nested_pattern = re.compile(
+        r"<tool>\s*<name>\s*(\w+)\s*</name>\s*<json>(.*?)</json>\s*</tool>",
+        re.DOTALL
+    )
+    for match in tool_nested_pattern.finditer(text):
+        tool_name = match.group(1)
+        args_str = match.group(2).strip()
+        try:
+            args = json.loads(args_str)
+        except json.JSONDecodeError:
+            args = {}
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
     # Format 2 (legacy): <function_call name="X"><args>JSON</args></function_call>
     fc_pattern = re.compile(
         r'<function_call\s+name\s*=\s*"(\w+)"\s*>\s*'
@@ -277,6 +295,7 @@ def _extract_xml_tags(text: str) -> list:
 
 
 def strip_tool_calls(text: str) -> str:
+    text = re.sub(r"<tool>\s*<name>\s*\w+\s*</name>\s*<json>.*?</json>\s*</tool>", "", text, flags=re.DOTALL)
     """Remove tool call XML blocks from text."""
     text = re.sub(r'<tool>\s*\w+\s*</tool>\s*<json>.*?</json>', '', text, flags=re.DOTALL)
     text = re.sub(r'<function_call\s+name\s*=\s*"[^"]*"\s*>.*?</function_call>', '', text, flags=re.DOTALL)
