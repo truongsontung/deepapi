@@ -213,7 +213,7 @@ def log_req():
 def log_resp(response):
     if request.path == "/v1/chat/completions" and request.method == "POST":
         with open("/tmp/cli_debug.log", "a") as f:
-            f.write("RESP status=%s\n" % response.status)
+            f.write("RESP status=%s content_type=%s\n" % (response.status, response.content_type))
             if response.content_type == "application/json":
                 try:
                     data = response.get_json()
@@ -223,6 +223,9 @@ def log_resp(response):
                     f.write("tool_calls=%s\n" % tc)
                 except:
                     f.write("raw=%s\n" % response.get_data()[:200])
+            elif "text/event-stream" in (response.content_type or ""):
+                data = response.get_data()
+                f.write("sse_stream=%s\n" % data[:3000])
             f.write("---\n")
     return response
 
@@ -266,6 +269,8 @@ def _extract_xml_tags(text: str) -> list:
     """Parse tool call XML from text. Supports:
     1. <tool>name</tool><json>{...}</json>
     2. <function_call name="X"><args>JSON</args></function_call> (legacy)
+    3. <tool><name>X</name><parameter name="Y" string="true">value</parameter>...</tool>
+    4. <tool_name>...</tool_name> (bare tool tags from CodeAI)
     """
     tools = []
     
@@ -285,6 +290,53 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
     
+    # Format 3: <tool><name>X</name><parameter ...>value</parameter>...</tool>
+    tool_block_pattern = re.compile(
+        r'<tool>\s*<name>(\w+)</name>(.*?)</tool>',
+        re.DOTALL
+    )
+    for match in tool_block_pattern.finditer(text):
+        tool_name = match.group(1)
+        params_block = match.group(2)
+        args = {}
+        param_pattern = re.compile(
+            r'<parameter\s+name\s*=\s*"(\w+)"[^>]*>\s*(.*?)\s*</parameter>',
+            re.DOTALL
+        )
+        for pm in param_pattern.finditer(params_block):
+            pname = pm.group(1)
+            pvalue = pm.group(2).strip()
+            # Parse string="true" boolean or string="false" for non-string values
+            type_match = re.search(r'string\s*=\s*"(true|false)"', pm.group(0))
+            if type_match and type_match.group(1) == "false":
+                try:
+                    pvalue = json.loads(pvalue)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            args[pname] = pvalue
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
+    # Format 4: Bare tool tags like <bash>...</bash>, <read>...</read>, <write>...</write>
+    # These are CodeAI-style: <tool_name>content</tool_name> - no parameters
+    tool_names = ['bash', 'read', 'write', 'edit', 'web_search', 'AskUserQuestion', 'UpdatePlan']
+    for tname in tool_names:
+        bare_pattern = re.compile(
+            rf'<{tname}>\s*(.*?)\s*</{tname}>',
+            re.DOTALL
+        )
+        for match in bare_pattern.finditer(text):
+            content = match.group(1).strip()
+            # Try parse as JSON, otherwise treat as raw text
+            try:
+                args = json.loads(content)
+            except json.JSONDecodeError:
+                args = {"content": content} if content else {}
+            tools.append({"name": tname, "arguments": args})
+    if tools:
+        return tools
+
     # Format 2 (legacy): <function_call name="X"><args>JSON</args></function_call>
     fc_pattern = re.compile(
         r'<function_call\s+name\s*=\s*"(\w+)"\s*>\s*'
@@ -307,6 +359,10 @@ def strip_tool_calls(text: str) -> str:
     """Remove tool call XML blocks from text."""
     text = re.sub(r'<tool>\s*\w+\s*</tool>\s*<json>.*?</json>', '', text, flags=re.DOTALL)
     text = re.sub(r'<function_call\s+name\s*=\s*"[^"]*"\s*>.*?</function_call>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<tool>\s*<name>\w+</name>.*?</tool>', '', text, flags=re.DOTALL)
+    tool_names = ['bash', 'read', 'write', 'edit', 'web_search', 'AskUserQuestion', 'UpdatePlan']
+    for tname in tool_names:
+        text = re.sub(rf'<{tname}>.*?</{tname}>', '', text, flags=re.DOTALL)
     return text.strip()
 
 # ============================================================
@@ -793,14 +849,70 @@ def chat_completions():
                 },
             )
         else:
+            # Collect full response first, then parse XML tool calls from text.
+            # This ensures CodeAI (which sends tools as XML in system prompt, not via 'tools' param)
+            # still receives proper tool_calls SSE chunks.
             prompt = build_prompt(msgs)
+            result = None
+            last_err = None
+            for _attempt in range(3):
+                try:
+                    sess = make_session()
+                    session_id = create_session(token, session=sess)
+                    result = collect_response(
+                        token=token, session_id=session_id, prompt=prompt,
+                        model=model, thinking=thinking_enabled, http_session=sess,
+                    )
+                    break
+                except Exception as e:
+                    last_err = e
+                    print(f"[stream-notools] Attempt {_attempt+1} failed: {e}")
+                    invalidate_token(token)
+                    try:
+                        token = get_active_token(force_refresh=True)
+                    except:
+                        pass
+            if result is None:
+                err = {"error": {"type": "api_error", "message": str(last_err)}}
+                def err_gen():
+                    yield f"data: {json.dumps(err)}\n\n"
+                return Response(err_gen(), mimetype="text/event-stream")
+            text = result.get("text", "")
+            thinking = result.get("thinking", "")
+            tool_calls = _extract_xml_tags(text)
+            # Also try parsing from thinking text
+            tool_calls_from_thinking = _extract_xml_tags(thinking)
+            all_tool_calls = tool_calls + tool_calls_from_thinking
+            print(f"[stream-notools] text_len={len(text)}, tool_calls={tool_calls}", flush=True)
+            print(f"[stream-notools] thinking_len={len(thinking)}, tool_calls_from_thinking={tool_calls_from_thinking}", flush=True)
+            print(f"[stream-notools] text[:300]={repr(text[:300])}", flush=True)
+            print(f"[stream-notools] thinking[:300]={repr(thinking[:300])}", flush=True)
+            def notools_stream_gen():
+                thinking_text = thinking
+                if thinking_text:
+                    yield make_chunk(completion_id, model, {"role": "assistant", "reasoning_content": thinking_text})
+                if all_tool_calls:
+                    for i, tc in enumerate(all_tool_calls):
+                        cid = "call_" + uuid.uuid4().hex[:12]
+                        yield make_tool_call_chunk(completion_id, model, i, cid, name=tc["name"])
+                        args_str = json.dumps(tc["arguments"], ensure_ascii=False)
+                        yield make_tool_call_chunk(completion_id, model, i, "", arguments=args_str)
+                    yield make_chunk(completion_id, model, {}, finish_reason="tool_calls")
+                    yield "data: [DONE]\n\n"
+                else:
+                    clean = strip_tool_calls(text).strip()
+                    if clean:
+                        text_to_stream = clean
+                    else:
+                        text_to_stream = text
+                    yield from _yield_text_stream(completion_id, model, text_to_stream)
             return Response(
-                stream_generator(token, prompt, model, thinking_enabled, completion_id),
+                notools_stream_gen(),
                 mimetype="text/event-stream",
                 headers={
-                    "Cache-Control":    "no-cache",
+                    "Cache-Control": "no-cache",
                     "X-Accel-Buffering": "no",
-                    "Connection":       "keep-alive",
+                    "Connection": "keep-alive",
                 },
             )
 
