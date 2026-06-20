@@ -423,6 +423,33 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
+    # Format 8: <tool name="TOOL"><parameter name="KEY">value</parameter>...</tool>
+    tool_attr_pattern = re.compile(
+        r'<tool\s+name\s*=\s*"(\w+)"\s*>(.*?)</tool>',
+        re.DOTALL
+    )
+    for match in tool_attr_pattern.finditer(text):
+        tool_name = match.group(1)
+        params_block = match.group(2)
+        args = {}
+        param_pattern = re.compile(
+            r'<parameter\s+name\s*=\s*"(\w+)"[^>]*>\s*(.*?)\s*</parameter>',
+            re.DOTALL
+        )
+        for pm in param_pattern.finditer(params_block):
+            pname = pm.group(1)
+            pvalue = pm.group(2).strip()
+            type_match = re.search(r'string\s*=\s*"(true|false)"', pm.group(0))
+            if type_match and type_match.group(1) == "false":
+                try:
+                    pvalue = json.loads(pvalue)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            args[pname] = pvalue
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
     # Format 2 (legacy): <function_call name="X"><args>JSON</args></function_call>
     fc_pattern = re.compile(
         r'<function_call\s+name\s*=\s*"(\w+)"\s*>\s*'
@@ -447,6 +474,8 @@ def strip_tool_calls(text: str) -> str:
     text = re.sub(r'<function_call\s+name\s*=\s*"[^"]*"\s*>.*?</function_call>', '', text, flags=re.DOTALL)
     text = re.sub(r'<tool>\s*<name>\w+</name>.*?</tool>', '', text, flags=re.DOTALL)
     text = re.sub(r'<tool>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
+    # Format 8: <tool name="TOOL"><parameter ...>...</parameter></tool>
+    text = re.sub(r'<tool\s+name\s*=\s*"[^"]*"\s*>.*?</tool>', '', text, flags=re.DOTALL)
     tool_names = ['bash', 'read', 'write', 'edit', 'web_search', 'AskUserQuestion', 'UpdatePlan']
     for tname in tool_names:
         text = re.sub(rf'<tool>\s*<{tname}>.*?</{tname}>\s*</tool>', '', text, flags=re.DOTALL)
