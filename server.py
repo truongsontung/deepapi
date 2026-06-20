@@ -425,72 +425,92 @@ def make_tool_call_chunk(completion_id: str, model: str,
 # STREAM GENERATOR
 # ============================================================
 
-def stream_generator(token: str, prompt: str, model: str,
-                     thinking_enabled: bool, completion_id: str):
-    """Generator yield SSE strings theo OpenAI format"""
-
+def _stream_generator_inner(token: str, prompt: str, model: str,
+                           thinking_enabled: bool, completion_id: str,
+                           send_first_chunk: bool = True):
+    """Inner stream generator - yields SSE chunks, raises on error."""
     sess = make_session()
-    yield make_chunk(completion_id, model, {"role": "assistant", "content": ""})
+    if send_first_chunk:
+        yield make_chunk(completion_id, model, {"role": "assistant", "content": ""})
 
     session_id     = None
     msg_id         = 0
     last_status    = ""
 
-    try:
-        session_id = create_session(token, session=sess)
-        pow_resp   = get_pow(token, session=sess)
+    session_id = create_session(token, session=sess)
+    pow_resp   = get_pow(token, session=sess)
 
-        lines = call_completion(
-            token=token, session_id=session_id, prompt=prompt,
-            model=model, thinking=thinking_enabled,
-            pow_response=pow_resp, http_session=sess,
-        )
+    lines = call_completion(
+        token=token, session_id=session_id, prompt=prompt,
+        model=model, thinking=thinking_enabled,
+        pow_response=pow_resp, http_session=sess,
+    )
 
-        def consume(lines_gen):
-            nonlocal msg_id, last_status
-            for chunk in parse_sse_lines(lines_gen):
-                if chunk.get("response_message_id"):
-                    msg_id = int(chunk["response_message_id"])
+    def consume(lines_gen):
+        nonlocal msg_id, last_status
+        for chunk in parse_sse_lines(lines_gen):
+            if chunk.get("response_message_id"):
+                msg_id = int(chunk["response_message_id"])
 
-                p = chunk.get("p", "")
-                v = chunk.get("v")
+            p = chunk.get("p", "")
+            v = chunk.get("v")
 
-                if "status" in p and isinstance(v, str):
-                    last_status = v
-                if "auto_continue" in p and v is True:
-                    last_status = "AUTO_CONTINUE"
+            if "status" in p and isinstance(v, str):
+                last_status = v
+            if "auto_continue" in p and v is True:
+                last_status = "AUTO_CONTINUE"
 
-                if isinstance(v, str) and "content" in p:
-                    if "thinking" in p.lower():
-                        yield make_chunk(completion_id, model, {"reasoning_content": v})
-                    else:
-                        yield make_chunk(completion_id, model, {"content": v})
+            if isinstance(v, str) and "content" in p:
+                if "thinking" in p.lower():
+                    yield make_chunk(completion_id, model, {"reasoning_content": v})
+                else:
+                    yield make_chunk(completion_id, model, {"content": v})
 
-        yield from consume(lines)
+    yield from consume(lines)
 
-        # Auto-continue
-        for rnd in range(8):
-            if last_status.upper() not in ("INCOMPLETE", "AUTO_CONTINUE"):
-                break
-            if msg_id <= 0:
-                break
-            print(f"[auto_continue] round {rnd+1}, msg_id={msg_id}")
-            pow2 = get_pow(token, session=sess)
-            cont = call_continue(token, session_id, msg_id,
-                                 pow_response=pow2, http_session=sess)
-            last_status = ""
-            yield from consume(cont)
+    # Auto-continue
+    for rnd in range(8):
+        if last_status.upper() not in ("INCOMPLETE", "AUTO_CONTINUE"):
+            break
+        if msg_id <= 0:
+            break
+        print(f"[auto_continue] round {rnd+1}, msg_id={msg_id}")
+        pow2 = get_pow(token, session=sess)
+        cont = call_continue(token, session_id, msg_id,
+                             pow_response=pow2, http_session=sess)
+        last_status = ""
+        yield from consume(cont)
 
-        yield make_chunk(completion_id, model, {}, finish_reason="stop")
-        yield "data: [DONE]\n\n"
+    yield make_chunk(completion_id, model, {}, finish_reason="stop")
+    yield "data: [DONE]\n\n"
 
-    except Exception as e:
-        invalidate_token(token)
-        err = {"error": {"type": "api_error", "message": str(e)}}
-        yield f"data: {json.dumps(err)}\n\n"
-    finally:
-        # Giữ lại lịch sử chat trên DeepSeek, không xóa session
-        pass
+
+def stream_generator(token: str, prompt: str, model: str,
+                     thinking_enabled: bool, completion_id: str):
+    """Generator with auto-retry on failure."""
+    MAX_RETRIES = 2
+    current_token = token
+
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            yield from _stream_generator_inner(
+                current_token, prompt, model, thinking_enabled,
+                completion_id, send_first_chunk=(attempt == 0)
+            )
+            return  # Success
+        except Exception as e:
+            invalidate_token(current_token)
+            if attempt < MAX_RETRIES:
+                print(f"[retry] Stream attempt {attempt+1} failed ({e}), retrying...")
+                try:
+                    current_token = get_active_token()
+                except Exception:
+                    pass
+                import time as _time
+                _time.sleep(2)
+            else:
+                err = {"error": {"type": "api_error", "message": str(e)}}
+                yield f"data: {json.dumps(err)}\n\n"
 
 
 def stream_with_tools(token: str, msgs: list, model: str,
