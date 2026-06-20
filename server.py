@@ -652,21 +652,37 @@ def chat_completions():
 
     # ── NON-STREAM MODE ──
     prompt = build_prompt(msgs, tools if tools else None)
-    sess       = make_session()
-    session_id = None
-    try:
-        session_id = create_session(token, session=sess)
-        result = collect_response(
-            token=token, session_id=session_id, prompt=prompt,
-            model=model, thinking=thinking_enabled, http_session=sess,
-        )
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        invalidate_token(token)
-        return jsonify({"error": {"message": str(e)}}), 500
-    finally:
-        pass
+    
+    MAX_RETRIES = 2
+    last_error = None
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            token = get_active_token()
+        except Exception as e:
+            return jsonify({"error": {"message": f"Auth failed: {e}"}}), 500
+        
+        sess = make_session()
+        session_id = None
+        try:
+            session_id = create_session(token, session=sess)
+            result = collect_response(
+                token=token, session_id=session_id, prompt=prompt,
+                model=model, thinking=thinking_enabled, http_session=sess,
+            )
+            break  # Success
+        except Exception as e:
+            last_error = e
+            invalidate_token(token)
+            if attempt < MAX_RETRIES:
+                print(f"[retry] Attempt {attempt+1} failed ({e}), retrying with next account...")
+                import time as _time
+                _time.sleep(2)
+            else:
+                import traceback
+                traceback.print_exc()
+                return jsonify({"error": {"message": str(e)}}), 500
+        finally:
+            pass
 
     text = result.get("text", "")
     tool_calls = _extract_xml_tags(text)
