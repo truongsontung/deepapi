@@ -1038,9 +1038,13 @@ def collect_response(token: str, session_id: str, prompt: str,
         last_status = ""
         process(cont)
 
+    final_text = "".join(text_parts)
+    final_thinking = "".join(thinking_parts)
+    if not final_text and not final_thinking:
+        raise RuntimeError("DeepSeek returned empty response - possible rate limit or bad token")
     return {
-        "text":                "".join(text_parts),
-        "thinking":            "".join(thinking_parts),
+        "text":                final_text,
+        "thinking":            final_thinking,
         "finish_reason":       finish_reason,
         "session_id":          session_id,
         "response_message_id": msg_id,

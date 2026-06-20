@@ -152,7 +152,7 @@ def _token_refresh_loop():
                 print(f"[auth] Refresh fail #{i+1} ({acc.get(email)}): {e}")
         print("[auth] Token refresh complete")
 
-def get_active_token() -> str:
+def get_active_token(force_refresh: bool = False) -> str:
     global _current_account_index
     with _account_lock:
         if not ACCOUNTS:
@@ -160,27 +160,25 @@ def get_active_token() -> str:
             
         for _ in range(len(ACCOUNTS)):
             acc = ACCOUNTS[_current_account_index]
-            if not acc.get("token"):
+            if force_refresh or not acc.get("token"):
                 try:
-                    print(f"[auth] Đang login tài khoản #{_current_account_index + 1}: {acc.get('email')}")
+                    print(f"[auth] Login tai khoan #{_current_account_index + 1}: {acc.get('email')}")
                     token = login(
                         email=acc.get("email"),
                         password=acc.get("password")
                     )
                     acc["token"] = token
-                    print(f"[auth] Login OK cho tài khoản #{_current_account_index + 1}: {token[:20]}...")
+                    print(f"[auth] Login OK #{_current_account_index + 1}: {token[:20]}...")
                 except Exception as e:
-                    print(f"[auth] Tài khoản #{_current_account_index + 1} ({acc.get('email')}) đăng nhập lỗi: {e}")
-                    # Chuyển sang tài khoản tiếp theo nếu tài khoản này lỗi đăng nhập
+                    print(f"[auth] Login fail #{_current_account_index + 1} ({acc.get('email')}): {e}")
                     _current_account_index = (_current_account_index + 1) % len(ACCOUNTS)
                     continue
             
             token = acc["token"]
-            # Xoay vòng tài khoản cho lần gọi tiếp theo
             _current_account_index = (_current_account_index + 1) % len(ACCOUNTS)
             return token
             
-        raise RuntimeError("Tất cả các tài khoản DeepSeek được cấu hình đều đăng nhập thất bại!")
+        raise RuntimeError("Tat ca tai khoan DeepSeek deu login that bai!")
 
 def invalidate_token(token: str = None):
     with _account_lock:
@@ -199,6 +197,35 @@ def invalidate_token(token: str = None):
 # ============================================================
 
 app = Flask(__name__)
+# ---- DEBUG LOGGING ----
+@app.before_request
+def log_req():
+    if request.path == "/v1/chat/completions" and request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        msgs = body.get("messages", [])
+        with open("/tmp/cli_debug.log", "a") as f:
+            f.write("\n=== REQ model=%s stream=%s ===\n" % (body.get("model"), body.get("stream")))
+            for m in msgs[-2:]:
+                c = str(m.get("content",""))[:100]
+                f.write("[%s] %s\n" % (m.get("role"), c))
+
+@app.after_request
+def log_resp(response):
+    if request.path == "/v1/chat/completions" and request.method == "POST":
+        with open("/tmp/cli_debug.log", "a") as f:
+            f.write("RESP status=%s\n" % response.status)
+            if response.content_type == "application/json":
+                try:
+                    data = response.get_json()
+                    c = data.get("choices",[{}])[0].get("message",{}).get("content","")
+                    tc = data.get("choices",[{}])[0].get("message",{}).get("tool_calls")
+                    f.write("content=%s\n" % repr(c[:200] if c else c))
+                    f.write("tool_calls=%s\n" % tc)
+                except:
+                    f.write("raw=%s\n" % response.get_data()[:200])
+            f.write("---\n")
+    return response
+
 
 # CORS support for web clients
 @app.after_request
@@ -238,9 +265,7 @@ def require_auth():
 def _extract_xml_tags(text: str) -> list:
     """Parse tool call XML from text. Supports:
     1. <tool>name</tool><json>{...}</json>
-    1. <tool>name</tool><json>{...}</json>
-    2. <tool><name>X</name><json>{...}</json></tool>
-    3. <function_call name="X"><args>JSON</args></function_call> (legacy)
+    2. <function_call name="X"><args>JSON</args></function_call> (legacy)
     """
     tools = []
     
@@ -260,39 +285,7 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
     
-    # Format 2: <tool><name>X</name><json>{...}</json></tool>
-    tool_nested_pattern = re.compile(
-        r"<tool>\s*<name>\s*(\w+)\s*</name>\s*<json>(.*?)</json>\s*</tool>",
-        re.DOTALL
-    )
-    for match in tool_nested_pattern.finditer(text):
-        tool_name = match.group(1)
-        args_str = match.group(2).strip()
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = {}
-        tools.append({"name": tool_name, "arguments": args})
-    if tools:
-        return tools
-
-    # Format 2: <tool><name>X</name><json>{...}</json></tool>
-    tool_nested_pattern = re.compile(
-        r"<tool>\s*<name>\s*(\w+)\s*</name>\s*<json>(.*?)</json>\s*</tool>",
-        re.DOTALL
-    )
-    for match in tool_nested_pattern.finditer(text):
-        tool_name = match.group(1)
-        args_str = match.group(2).strip()
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = {}
-        tools.append({"name": tool_name, "arguments": args})
-    if tools:
-        return tools
-    
-    # Format 3 (legacy): <function_call name="X"><args>JSON</args></function_call>
+    # Format 2 (legacy): <function_call name="X"><args>JSON</args></function_call>
     fc_pattern = re.compile(
         r'<function_call\s+name\s*=\s*"(\w+)"\s*>\s*'
         r'<args>(.*?)</args>\s*'
@@ -311,10 +304,8 @@ def _extract_xml_tags(text: str) -> list:
 
 
 def strip_tool_calls(text: str) -> str:
-    text = re.sub(r"<tool>\s*<name>\s*\w+\s*</name>\s*<json>.*?</json>\s*</tool>", "", text, flags=re.DOTALL)
     """Remove tool call XML blocks from text."""
     text = re.sub(r'<tool>\s*\w+\s*</tool>\s*<json>.*?</json>', '', text, flags=re.DOTALL)
-    text = re.sub(r'<tool>\s*<name>\s*\w+\s*</name>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
     text = re.sub(r'<function_call\s+name\s*=\s*"[^"]*"\s*>.*?</function_call>', '', text, flags=re.DOTALL)
     return text.strip()
 
@@ -367,7 +358,7 @@ def _has_xml_tools(messages: list) -> bool:
                 return True
     return False
 
-XML_TOOL_INSTRUCTION = "\n\n**CRITICAL: When you need to use a tool, output ONLY the XML tag. No text before, no text after. Start with < and end with >.**\n\nNếu không cần dùng tool, hãy trả lời tự nhiên."
+XML_TOOL_INSTRUCTION = "\n\n**CRITICAL: When you need to use a tool, output ONLY the XML tag. No text before, no text after. Start with < and end with >.**"
 
 def build_prompt(messages: list, tools: list = None) -> str:
     """Build a text prompt from OpenAI-format messages, with optional tool support."""
@@ -392,6 +383,7 @@ def build_prompt(messages: list, tools: list = None) -> str:
             content = str(content)
 
         if role == "system":
+            content = str(content).replace("If none of the available skills match, respond with an empty array, i.e. `{\"skillNames\": []}`.", "Neu khong co skill phu hop, hay tra loi tu nhien bang tieng Viet.")
             if has_implicit_tools and not tool_prompt_inserted:
                 content = content + XML_TOOL_INSTRUCTION
                 tool_prompt_inserted = True
@@ -433,8 +425,7 @@ def build_prompt(messages: list, tools: list = None) -> str:
         (msg.get("role") == "assistant" and msg.get("tool_calls"))
         for msg in messages
     )
-    suffix = " <tool>" if (has_explicit_tools and not has_tool_history) else ""
-    parts.append(f"Assistant:{suffix}")
+    parts.append("Assistant:")
     return "\n\n".join(parts)
 
 
@@ -732,12 +723,6 @@ def chat_completions():
 
     thinking_enabled = bool(thinking_flag) if thinking_flag is not None \
                        else (get_model_type(model) in ("reasoner", "expert"))
-    # Nếu system prompt yêu cầu JSON (skill matching) -> tắt thinking để tránh reasoning lẫn vào
-    if not thinking_flag:
-        for m in msgs:
-            if m.get("role") == "system" and ("Response in JSON format" in str(m.get("content","")) or "skillNames" in str(m.get("content",""))):
-                thinking_enabled = False
-                break
 
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
 
@@ -751,14 +736,60 @@ def chat_completions():
     # ── STREAM MODE ──
     if stream:
         if tools:
+            # Use non-stream logic with retry for rate limit handling
+            prompt = build_prompt(msgs, tools)
+            result = None
+            last_err = None
+            for _attempt in range(3):
+                try:
+                    sess = make_session()
+                    session_id = create_session(token, session=sess)
+                    result = collect_response(
+                        token=token, session_id=session_id, prompt=prompt,
+                        model=model, thinking=thinking_enabled, http_session=sess,
+                    )
+                    break
+                except Exception as e:
+                    last_err = e
+                    print(f"[stream-tools] Attempt {_attempt+1} failed: {e}")
+                    invalidate_token(token)
+                    try:
+                        token = get_active_token(force_refresh=True)
+                    except:
+                        pass
+            if result is None:
+                err = {"error": {"type": "api_error", "message": str(last_err)}}
+                def err_gen():
+                    yield f"data: {json.dumps(err)}\n\n"
+                return Response(err_gen(), mimetype="text/event-stream")
+            text = result.get("text", "")
+            tool_calls = _extract_xml_tags(text)
+            def tool_stream_gen():
+                thinking_text = result.get("thinking", "")
+                if thinking_text:
+                    yield make_chunk(completion_id, model, {"role": "assistant", "reasoning_content": thinking_text})
+                if tool_calls:
+                    for i, tc in enumerate(tool_calls):
+                        cid = "call_" + uuid.uuid4().hex[:12]
+                        yield make_tool_call_chunk(completion_id, model, i, cid, name=tc["name"])
+                        args_str = json.dumps(tc["arguments"], ensure_ascii=False)
+                        yield make_tool_call_chunk(completion_id, model, i, "", arguments=args_str)
+                    yield make_chunk(completion_id, model, {}, finish_reason="tool_calls")
+                    yield "data: [DONE]\n\n"
+                else:
+                    clean = strip_tool_calls(text).strip()
+                    if clean:
+                        text_to_stream = clean
+                    else:
+                        text_to_stream = text
+                    yield from _yield_text_stream(completion_id, model, text_to_stream)
             return Response(
-                stream_with_tools(token, msgs, model, thinking_enabled,
-                                  completion_id, tools),
+                tool_stream_gen(),
                 mimetype="text/event-stream",
                 headers={
-                    "Cache-Control":    "no-cache",
+                    "Cache-Control": "no-cache",
                     "X-Accel-Buffering": "no",
-                    "Connection":       "keep-alive",
+                    "Connection": "keep-alive",
                 },
             )
         else:
@@ -780,7 +811,7 @@ def chat_completions():
     last_error = None
     for attempt in range(MAX_RETRIES + 1):
         try:
-            token = get_active_token()
+            token = get_active_token(force_refresh=(attempt > 0))
         except Exception as e:
             return jsonify({"error": {"message": f"Auth failed: {e}"}}), 500
         
