@@ -331,7 +331,7 @@ def _has_xml_tools(messages: list) -> bool:
                 return True
     return False
 
-XML_TOOL_INSTRUCTION = "\n\n**CRITICAL: When you need to use a tool, output ONLY the XML tag. No text before, no text after. Start with < and end with >.**"
+XML_TOOL_INSTRUCTION = "\n\n**CRITICAL: When you need to use a tool, output ONLY the XML tag. No text before, no text after. Start with < and end with >.**\n\nNếu không cần dùng tool, hãy trả lời tự nhiên."
 
 def build_prompt(messages: list, tools: list = None) -> str:
     """Build a text prompt from OpenAI-format messages, with optional tool support."""
@@ -397,7 +397,7 @@ def build_prompt(messages: list, tools: list = None) -> str:
         (msg.get("role") == "assistant" and msg.get("tool_calls"))
         for msg in messages
     )
-    suffix = " <tool>" if (has_explicit_tools and not has_tool_history) else (" <" if has_implicit_tools else "")
+    suffix = " <tool>" if (has_explicit_tools and not has_tool_history) else ""
     parts.append(f"Assistant:{suffix}")
     return "\n\n".join(parts)
 
