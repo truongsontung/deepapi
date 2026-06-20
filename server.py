@@ -440,11 +440,31 @@ def _stream_generator_inner(token: str, prompt: str, model: str,
     session_id = create_session(token, session=sess)
     pow_resp   = get_pow(token, session=sess)
 
-    lines = call_completion(
-        token=token, session_id=session_id, prompt=prompt,
-        model=model, thinking=thinking_enabled,
-        pow_response=pow_resp, http_session=sess,
-    )
+    # Background call + heartbeat keep-alive to prevent CLI timeout
+    lines_container = []
+    error_container = []
+    def _bg_call():
+        try:
+            lines_container.append(call_completion(
+                token=token, session_id=session_id, prompt=prompt,
+                model=model, thinking=thinking_enabled,
+                pow_response=pow_resp, http_session=sess,
+            ))
+        except Exception as e:
+            error_container.append(e)
+    _t = threading.Thread(target=_bg_call, daemon=True)
+    _t.start()
+    for _ in range(120):
+        if lines_container or error_container:
+            break
+        yield ": keepalive\n\n"
+        _t.join(timeout=3.0)
+    _t.join(timeout=10.0)
+    if error_container:
+        raise error_container[0]
+    if not lines_container:
+        raise RuntimeError("DeepSeek call timed out")
+    lines = lines_container[0]
 
     def consume(lines_gen):
         nonlocal msg_id, last_status
@@ -469,10 +489,13 @@ def _stream_generator_inner(token: str, prompt: str, model: str,
     yield from consume(lines)
 
     # Auto-continue
+    print(f"[debug] last_status={repr(last_status)}, msg_id={msg_id}")
     for rnd in range(8):
         if last_status.upper() not in ("INCOMPLETE", "AUTO_CONTINUE"):
+            print(f"[debug] auto-continue break, status={repr(last_status)}")
             break
         if msg_id <= 0:
+            print(f"[debug] auto-continue break, msg_id={msg_id}")
             break
         print(f"[auto_continue] round {rnd+1}, msg_id={msg_id}")
         pow2 = get_pow(token, session=sess)
@@ -480,6 +503,9 @@ def _stream_generator_inner(token: str, prompt: str, model: str,
                              pow_response=pow2, http_session=sess)
         last_status = ""
         yield from consume(cont)
+
+    if not last_status and msg_id == 0:
+        raise RuntimeError(f"DeepSeek returned empty response (no content, no status, no msg_id)")
 
     yield make_chunk(completion_id, model, {}, finish_reason="stop")
     yield "data: [DONE]\n\n"
