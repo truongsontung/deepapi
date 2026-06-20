@@ -365,6 +365,23 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
+    # Format 7: <tool><tool_name><json>{...}</json></tool> (missing </tool_name>)
+    # Variant of Format 6: <tool><read><json>{"file_path":"..."}</json></tool>
+    for tname in tool_names:
+        no_close_name_pattern = re.compile(
+            rf'<tool>\s*<{tname}>\s*<json>(.*?)</json>\s*</tool>',
+            re.DOTALL
+        )
+        for match in no_close_name_pattern.finditer(text):
+            args_str = match.group(1).strip()
+            try:
+                args = json.loads(args_str)
+            except (json.JSONDecodeError, ValueError):
+                args = {}
+            tools.append({"name": tname, "arguments": args})
+    if tools:
+        return tools
+
     # Format 5: <tool><tool_name><param>value</param>...</tool_name></tool>
     # CodeAI nested XML: <tool><bash><command>...</command><description>...</description></bash></tool>
     for tname in tool_names:
@@ -433,6 +450,7 @@ def strip_tool_calls(text: str) -> str:
     tool_names = ['bash', 'read', 'write', 'edit', 'web_search', 'AskUserQuestion', 'UpdatePlan']
     for tname in tool_names:
         text = re.sub(rf'<tool>\s*<{tname}>.*?</{tname}>\s*</tool>', '', text, flags=re.DOTALL)
+        text = re.sub(rf'<tool>\s*<{tname}>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
         text = re.sub(rf'<{tname}>.*?</{tname}>', '', text, flags=re.DOTALL)
     return text.strip()
 
