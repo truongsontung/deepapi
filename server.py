@@ -289,6 +289,35 @@ def _extract_xml_tags(text: str) -> list:
         tools.append({"name": tool_name, "arguments": args})
     if tools:
         return tools
+
+    # Format 1b: <tool>\n<json>{...}</json> (no tool name, possibly no closing </tool>)
+    # Infer tool name from JSON keys
+    no_name_pattern = re.compile(
+        r'<tool>\s*<json>(.*?)</json>',
+        re.DOTALL
+    )
+    KEY_TO_TOOL = {
+        "questions": "AskUserQuestion",
+        "command": "bash",
+        "file_path": "read",
+        "plan": "UpdatePlan",
+        "query": "WebSearch",
+        "old_string": "edit",
+    }
+    for match in no_name_pattern.finditer(text):
+        args_str = match.group(1).strip()
+        try:
+            args = json.loads(args_str)
+        except json.JSONDecodeError:
+            args = {}
+        tool_name = "unknown"
+        for key, tname in KEY_TO_TOOL.items():
+            if key in args:
+                tool_name = tname
+                break
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
     
     # Format 3: <tool><name>X</name><parameter ...>value</parameter>...</tool>
     tool_block_pattern = re.compile(
@@ -318,9 +347,32 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
+    # Format 5: <tool><tool_name><param>value</param>...</tool_name></tool>
+    # CodeAI nested XML: <tool><bash><command>...</command><description>...</description></bash></tool>
+    tool_names = ['bash', 'read', 'write', 'edit', 'web_search', 'AskUserQuestion', 'UpdatePlan']
+    for tname in tool_names:
+        inner_tool_pattern = re.compile(
+            rf'<tool>\s*<{tname}>(.*?)</{tname}>\s*</tool>',
+            re.DOTALL
+        )
+        for match in inner_tool_pattern.finditer(text):
+            inner_content = match.group(1)
+            args = {}
+            child_pattern = re.compile(r'<(\w+)>(.*?)</\1>', re.DOTALL)
+            for cm in child_pattern.finditer(inner_content):
+                key = cm.group(1)
+                value = cm.group(2).strip()
+                try:
+                    value = json.loads(value)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                args[key] = value
+            tools.append({"name": tname, "arguments": args})
+    if tools:
+        return tools
+
     # Format 4: Bare tool tags like <bash>...</bash>, <read>...</read>, <write>...</write>
     # These are CodeAI-style: <tool_name>content</tool_name> - no parameters
-    tool_names = ['bash', 'read', 'write', 'edit', 'web_search', 'AskUserQuestion', 'UpdatePlan']
     for tname in tool_names:
         bare_pattern = re.compile(
             rf'<{tname}>\s*(.*?)\s*</{tname}>',
@@ -360,8 +412,10 @@ def strip_tool_calls(text: str) -> str:
     text = re.sub(r'<tool>\s*\w+\s*</tool>\s*<json>.*?</json>', '', text, flags=re.DOTALL)
     text = re.sub(r'<function_call\s+name\s*=\s*"[^"]*"\s*>.*?</function_call>', '', text, flags=re.DOTALL)
     text = re.sub(r'<tool>\s*<name>\w+</name>.*?</tool>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<tool>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
     tool_names = ['bash', 'read', 'write', 'edit', 'web_search', 'AskUserQuestion', 'UpdatePlan']
     for tname in tool_names:
+        text = re.sub(rf'<tool>\s*<{tname}>.*?</{tname}>\s*</tool>', '', text, flags=re.DOTALL)
         text = re.sub(rf'<{tname}>.*?</{tname}>', '', text, flags=re.DOTALL)
     return text.strip()
 
@@ -414,7 +468,7 @@ def _has_xml_tools(messages: list) -> bool:
                 return True
     return False
 
-XML_TOOL_INSTRUCTION = "\n\n**CRITICAL: When you need to use a tool, output ONLY the XML tag. No text before, no text after. Start with < and end with >.**"
+XML_TOOL_INSTRUCTION = "\n\n**CRITICAL TOOL CALL FORMAT: To use a tool, output `<tool>NAME</tool>` followed by `<json>PARAMS</json>`. Example: `<tool>bash</tool><json>{\"command\":\"ls\"}</json>`. The tool name inside `<tool>` tag is REQUIRED. No text before or after.**"
 
 def build_prompt(messages: list, tools: list = None) -> str:
     """Build a text prompt from OpenAI-format messages, with optional tool support."""
