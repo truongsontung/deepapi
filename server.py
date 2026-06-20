@@ -236,15 +236,36 @@ def require_auth():
 # ============================================================
 
 def _extract_xml_tags(text: str) -> list:
-    """Parse <function_call name="X"><args>JSON</args></function_call> from text."""
+    """Parse tool call XML from text. Supports:
+    1. <tool>name</tool><json>{...}</json>
+    2. <function_call name="X"><args>JSON</args></function_call> (legacy)
+    """
     tools = []
-    pattern = re.compile(
+    
+    # Format 1: <tool>name</tool><json>{...}</json>
+    tool_pattern = re.compile(
+        r'<tool>\s*(\w+)\s*</tool>\s*<json>(.*?)</json>',
+        re.DOTALL
+    )
+    for match in tool_pattern.finditer(text):
+        tool_name = match.group(1)
+        args_str = match.group(2).strip()
+        try:
+            args = json.loads(args_str)
+        except json.JSONDecodeError:
+            args = {}
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+    
+    # Format 2 (legacy): <function_call name="X"><args>JSON</args></function_call>
+    fc_pattern = re.compile(
         r'<function_call\s+name\s*=\s*"(\w+)"\s*>\s*'
         r'<args>(.*?)</args>\s*'
         r'</function_call>',
         re.DOTALL
     )
-    for match in pattern.finditer(text):
+    for match in fc_pattern.finditer(text):
         tool_name = match.group(1)
         args_str = match.group(2).strip()
         try:
@@ -256,11 +277,10 @@ def _extract_xml_tags(text: str) -> list:
 
 
 def strip_tool_calls(text: str) -> str:
-    """Remove <function_call> XML blocks from text."""
-    return re.sub(
-        r'<function_call\s+name\s*=\s*"[^"]*"\s*>.*?</function_call>',
-        '', text, flags=re.DOTALL
-    ).strip()
+    """Remove tool call XML blocks from text."""
+    text = re.sub(r'<tool>\s*\w+\s*</tool>\s*<json>.*?</json>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<function_call\s+name\s*=\s*"[^"]*"\s*>.*?</function_call>', '', text, flags=re.DOTALL)
+    return text.strip()
 
 # ============================================================
 # PROMPT BUILDER (with optional tool support)
@@ -273,11 +293,10 @@ def _build_tool_system_prompt(tools: list) -> str:
 
     lines = ["## Available Tools"]
     lines.append("To use a tool, output EXACTLY:")
-    lines.append('<function_call name="tool_name">')
-    lines.append("<args>")
-    lines.append('{"param1": "value1", "param2": "value2"}')
-    lines.append("</args>")
-    lines.append("</function_call>")
+    lines.append("<tool>tool_name</tool>")
+    lines.append("<json>")
+    lines.append('{"param1": "value1"}')
+    lines.append("</json>")
     lines.append("")
     lines.append("Available tools:")
 
@@ -357,9 +376,8 @@ def build_prompt(messages: list, tools: list = None) -> str:
                     if isinstance(args_str, dict):
                         args_str = json.dumps(args_str)
                     parts.append(
-                        f'Assistant: <function_call name="{func.get("name", "")}">\n'
-                        f'<args>\n{args_str}\n</args>\n'
-                        f'</function_call>'
+                        f'Assistant: <tool>{func.get("name", "")}</tool>\n'
+                        f'<json>\n{args_str}\n</json>'
                     )
             else:
                 parts.append(f"Assistant: {content}")
@@ -379,7 +397,7 @@ def build_prompt(messages: list, tools: list = None) -> str:
         (msg.get("role") == "assistant" and msg.get("tool_calls"))
         for msg in messages
     )
-    suffix = " <function_call name=\"" if (has_explicit_tools and not has_tool_history) else (" <" if has_implicit_tools else "")
+    suffix = " <tool>" if (has_explicit_tools and not has_tool_history) else (" <" if has_implicit_tools else "")
     parts.append(f"Assistant:{suffix}")
     return "\n\n".join(parts)
 
