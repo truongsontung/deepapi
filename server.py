@@ -724,6 +724,21 @@ def _extract_xml_tags(text: str) -> list:
     return tools
 
 
+def _extract_tool_calls_safe(text: str) -> list:
+    """Extract tool calls, but ignore if text is primarily explanatory.
+    Nếu sau khi strip XML mà text còn >50 ký tự hoặc >15% gốc
+    → đây là văn bản giải thích chứa XML ví dụ, không phải tool call thật.
+    """
+    tool_calls = _extract_xml_tags(text)
+    if not tool_calls:
+        return tool_calls
+    clean = strip_tool_calls(text).strip()
+    threshold = max(50, len(text) * 0.15)
+    if len(clean) > threshold:
+        return []  # text giải thích, bỏ qua tool call
+    return tool_calls
+
+
 def strip_tool_calls(text: str) -> str:
     """Remove tool call XML blocks from text."""
     text = re.sub(r'<tool>\s*\w+\s*</tool>\s*<json>.*?</json>', '', text, flags=re.DOTALL)
@@ -1162,7 +1177,7 @@ def stream_with_tools(token: str, msgs: list, model: str,
 
     result = result_container[0]
     text = result.get("text", "")
-    tool_calls = _extract_xml_tags(text)
+    tool_calls = _extract_tool_calls_safe(text)
     # Validate: nếu tool không hợp lệ → bắn lỗi text về cho model tự sửa
     tool_calls, tool_error = _validate_tool_calls(tool_calls, _get_valid_tool_set(tools))
 
@@ -1283,7 +1298,7 @@ def chat_completions():
                     yield f"data: {json.dumps(err)}\n\n"
                 return Response(err_gen(), mimetype="text/event-stream")
             text = result.get("text", "")
-            tool_calls = _extract_xml_tags(text)
+            tool_calls = _extract_tool_calls_safe(text)
             tool_calls, tool_error = _validate_tool_calls(tool_calls, _get_valid_tool_set(tools))
             def tool_stream_gen():
                 thinking_text = result.get("thinking", "")
@@ -1347,7 +1362,7 @@ def chat_completions():
                 return Response(err_gen(), mimetype="text/event-stream")
             text = result.get("text", "")
             thinking = result.get("thinking", "")
-            tool_calls = _extract_xml_tags(text)
+            tool_calls = _extract_tool_calls_safe(text)
             # BUG: Không parse tool call từ thinking!
             # thinking chứa reasoning nội bộ của model (có thể có XML mẫu, giả lập tool call),
             # dẫn đến FALSE POSITIVE: bắt nhầm XML không phải tool call thật.
@@ -1427,7 +1442,7 @@ def chat_completions():
             pass
 
     text = result.get("text", "")
-    tool_calls = _extract_xml_tags(text)
+    tool_calls = _extract_tool_calls_safe(text)
     # Validate: nếu tool không hợp lệ → bắn lỗi text về cho model tự sửa
     tool_calls, tool_error = _validate_tool_calls(tool_calls, _get_valid_tool_set(tools))
     if tool_error:
