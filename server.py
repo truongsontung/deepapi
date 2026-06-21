@@ -409,6 +409,28 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
+    # Format 11b: <tool><tool>NAME</tool><parameter>...</parameter> (missing </tool>)
+    tool_nested_no_close_pattern = re.compile(
+        r'<tool>\s*<tool>(\w+)</tool>\s*((?:\s*<parameter>[^<]*</parameter>\s*)+)',
+        re.DOTALL
+    )
+    for match in tool_nested_no_close_pattern.finditer(text):
+        tool_name = match.group(1)
+        params_block = match.group(2)
+        param_values = re.findall(r'<parameter>\s*(.*?)\s*</parameter>', params_block, re.DOTALL)
+        args = {}
+        for i in range(0, len(param_values) - 1, 2):
+            key = param_values[i].strip()
+            val = param_values[i + 1].strip()
+            try:
+                val = json.loads(val)
+            except (json.JSONDecodeError, ValueError):
+                pass
+            args[key] = val
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
     # Format 3: <tool><name>X</name><parameter ...>value</parameter>...</tool>
     tool_block_pattern = re.compile(
         r'<tool>\s*<name>(\w+)</name>(.*?)</tool>',
