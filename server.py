@@ -288,6 +288,9 @@ def _extract_xml_tags(text: str) -> list:
     2. <function_call name="X"><args>JSON</args></function_call> (legacy)
     3. <tool><name>X</name><parameter name="Y" string="true">value</parameter>...</tool>
     4. <tool_name>...</tool_name> (bare tool tags from CodeAI)
+    5. <tool><tool_call name="X"><parameter name="Y" string="true/false">value</parameter>...</tool_call></tool>
+    6. <tool><tool_call>X</tool_call><parameter name="Y">value</parameter>...</tool>
+    7. <tool>{JSON}</tool> (raw JSON with name field)
     """
     tools = []
     
@@ -386,6 +389,60 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
+    # Format 10b: <tool><tool_call name="NAME"><parameter name="KEY" string="true/false">value</parameter>...</tool_call></tool>
+    tool_call_attr_param_pattern = re.compile(
+        r'<tool>\s*<tool_call\s+name\s*=\s*"(\w+)"\s*>(.*?)</tool_call>\s*</tool>',
+        re.DOTALL
+    )
+    for match in tool_call_attr_param_pattern.finditer(text):
+        tool_name = match.group(1)
+        params_block = match.group(2)
+        args = {}
+        param_pattern = re.compile(
+            r'<parameter\s+name\s*=\s*"(\w+)"[^>]*>\s*(.*?)\s*</parameter>',
+            re.DOTALL
+        )
+        for pm in param_pattern.finditer(params_block):
+            pname = pm.group(1)
+            pvalue = pm.group(2).strip()
+            type_match = re.search(r'string\s*=\s*"(true|false)"', pm.group(0))
+            if type_match and type_match.group(1) == "false":
+                try:
+                    pvalue = json.loads(pvalue)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            args[pname] = pvalue
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
+    # Format 10c: <tool><tool_call>NAME</tool_call><parameter name="KEY">value</parameter>...</tool>
+    tool_call_param_pattern = re.compile(
+        r'<tool>\s*<tool_call>(\w+)</tool_call>\s*((?:\s*<parameter\s+name\s*=\s*"\w+"[^>]*>\s*.*?\s*</parameter>\s*)+)</tool>',
+        re.DOTALL
+    )
+    for match in tool_call_param_pattern.finditer(text):
+        tool_name = match.group(1)
+        params_block = match.group(2)
+        args = {}
+        param_pattern2 = re.compile(
+            r'<parameter\s+name\s*=\s*"(\w+)"[^>]*>\s*(.*?)\s*</parameter>',
+            re.DOTALL
+        )
+        for pm in param_pattern2.finditer(params_block):
+            pname = pm.group(1)
+            pvalue = pm.group(2).strip()
+            type_match = re.search(r'string\s*=\s*"(true|false)"', pm.group(0))
+            if type_match and type_match.group(1) == "false":
+                try:
+                    pvalue = json.loads(pvalue)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            args[pname] = pvalue
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
     # Format 11: <tool><tool>NAME</tool><parameter>key</parameter><parameter>val</parameter>...</tool>
     # Sequential key-value parameter pairs
     tool_nested_tag_pattern = re.compile(
@@ -461,7 +518,7 @@ def _extract_xml_tags(text: str) -> list:
 
     # Format 6: <tool><tool_name><json>{...}</json></tool_name></tool>
     # CodeAI nested XML with json wrapper: <tool><read><json>{"file_path":"..."}</json></read></tool>
-    tool_names = ['bash', 'read', 'write', 'edit', 'web_search', 'AskUserQuestion', 'UpdatePlan']
+    tool_names = sorted(VALID_TOOLS)  # sync với VALID_TOOLS
     for tname in tool_names:
         json_inner_pattern = re.compile(
             rf'<tool>\s*<{tname}>\s*<json>(.*?)</json>\s*</{tname}>\s*</tool>',
@@ -619,8 +676,44 @@ def _extract_xml_tags(text: str) -> list:
             args = {}
         tools.append({"name": tool_name, "arguments": args})
 
+    # Format 12: <tool>{JSON}</tool> (raw JSON with name/direct tool call fields)
+    # Supports both <tool>{"name":"bash","command":"ls",...}</tool>
+    # and     <tool>{"name":"bash","description":"...","command":"...","sideEffects":[...]}</tool>
+    tool_raw_json_pattern = re.compile(
+        r'<tool>\s*(.+?)\s*</tool>',
+        re.DOTALL
+    )
+    for match in tool_raw_json_pattern.finditer(text):
+        content = match.group(1).strip()
+        # Only handle JSON objects/arrays (skip XML children)
+        if not (content.startswith('{') or content.startswith('[')):
+            continue
+        try:
+            data = json.loads(content)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(data, dict):
+            # Extract 'name' field for tool name; rest are arguments
+            tool_name = data.pop('name', None)
+            if tool_name:
+                tools.append({"name": tool_name, "arguments": data})
+            else:
+                # No name field → infer from JSON keys
+                for key, tname in KEY_TO_TOOL.items():
+                    if key in data:
+                        tools.append({"name": tname, "arguments": data})
+                        break
+        elif isinstance(data, list):
+            # Array of tool objects, each with a 'name' field
+            for item in data:
+                if isinstance(item, dict) and 'name' in item:
+                    name = item.pop('name')
+                    tools.append({"name": name, "arguments": item})
+    if tools:
+        return tools
+
     # Filter out noise: unknown tool names with empty args (usually XML format examples)
-    KNOWN_TOOLS = {'bash','read','write','edit','web_search','AskUserQuestion','UpdatePlan','unknown'}
+    KNOWN_TOOLS = VALID_TOOLS | {'unknown'}
     tools = [t for t in tools if t['name'] in KNOWN_TOOLS or t['arguments']]
     return tools
 
@@ -640,13 +733,71 @@ def strip_tool_calls(text: str) -> str:
     text = re.sub(r'<tool>\s*<tool>\w+</tool>\s*(<parameter>[^<]*</parameter>\s*)+</tool>', '', text, flags=re.DOTALL)
     # Format 8: <tool name="TOOL"><parameter ...>...</parameter></tool>
     text = re.sub(r'<tool\s+name\s*=\s*"[^"]*"\s*>.*?</tool>', '', text, flags=re.DOTALL)
-    tool_names = ['bash', 'read', 'write', 'edit', 'web_search', 'AskUserQuestion', 'UpdatePlan']
+    # Format 10b: <tool><tool_call name="NAME"><parameter ...>...</parameter></tool_call></tool>
+    text = re.sub(r'<tool>\s*<tool_call\s+name\s*=\s*"\w+"\s*>.*?</tool_call>\s*</tool>', '', text, flags=re.DOTALL)
+    # Format 10c: <tool><tool_call>NAME</tool_call><parameter name="KEY">value</parameter>...</tool>
+    text = re.sub(r'<tool>\s*<tool_call>\w+</tool_call>\s*(<parameter\s+name\s*=\s*"\w+"[^>]*>\s*.*?\s*</parameter>\s*)+</tool>', '', text, flags=re.DOTALL)
+    # Format 12: <tool>{JSON}</tool> (raw JSON)
+    text = re.sub(r'<tool>\s*\{[^}]*\}\s*</tool>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<tool>\s*\{.*?\}\s*</tool>', '', text, flags=re.DOTALL)
+    tool_names = sorted(VALID_TOOLS)  # sync với VALID_TOOLS
     for tname in tool_names:
         text = re.sub(rf'<tool>\s*<{tname}>.*?</{tname}>\s*</tool>', '', text, flags=re.DOTALL)
         text = re.sub(rf'<tool>\s*<{tname}>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
         text = re.sub(rf'<tool>\s*<{tname}>.*?</tool>', '', text, flags=re.DOTALL)
         text = re.sub(rf'<{tname}>.*?</{tname}>', '', text, flags=re.DOTALL)
     return text.strip()
+
+# ============================================================
+# TOOL VALIDATION
+# ============================================================
+
+# Danh sách tool hợp lệ - dùng để validate tool call trước khi emit
+# Nếu model gọi tool không có trong danh sách → bắn lỗi về để model tự sửa
+VALID_TOOLS = {
+    'bash',            # thực thi lệnh shell
+    'read',            # đọc file
+    'write',           # ghi file
+    'edit',            # sửa file
+    'AskUserQuestion', # hỏi người dùng
+    'UpdatePlan',      # cập nhật kế hoạch
+    'WebSearch',       # tìm kiếm web
+    'web_search',      # alias lowercase (XML parser dùng)
+}
+
+def _get_valid_tool_set(tools_param=None):
+    """Extract tool names from tools parameter (OpenAI format).
+    Nếu client gửi tools → validate theo danh sách đó.
+    Nếu không → dùng VALID_TOOLS mặc định.
+    """
+    if not tools_param:
+        return set(VALID_TOOLS)
+    valid = set(VALID_TOOLS)  # base set luôn được chấp nhận
+    for t in tools_param:
+        func = t.get('function', {})
+        name = func.get('name', '')
+        if name:
+            valid.add(name)
+    return valid
+
+def _validate_tool_calls(tool_calls, valid_set=None):
+    """Validate tool calls. Returns (valid_calls, error_message).
+    Nếu có tool name không hợp lệ → trả về list rỗng + thông báo lỗi
+    để model biết và tự sửa.
+    """
+    if not tool_calls:
+        return [], None
+    if valid_set is None:
+        valid_set = VALID_TOOLS
+    unknown = [tc['name'] for tc in tool_calls if tc['name'] not in valid_set]
+    if unknown:
+        msg = (
+            f"TOOL CALL ERROR: Unknown tool(s): {', '.join(unknown)}. "
+            f"Valid tools: {', '.join(sorted(valid_set))}. "
+            f"Please correct and use only valid tools from the list."
+        )
+        return [], msg
+    return tool_calls, None
 
 # ============================================================
 # PROMPT BUILDER (with optional tool support)
@@ -664,6 +815,9 @@ def _build_tool_system_prompt(tools: list) -> str:
     lines.append('{"param1": "value1"}')
     lines.append("</json>")
     lines.append("Or nested format: <tool><tool_name><param1>value1</param1></tool_name></tool>")
+    lines.append("")
+    lines.append("CRITICAL: Only use tools listed below. Any other tool name will cause an error.")
+    lines.append("Valid tool names: " + ", ".join(sorted(VALID_TOOLS)))
     lines.append("")
     lines.append("Available tools:")
 
@@ -698,7 +852,11 @@ def _has_xml_tools(messages: list) -> bool:
                 return True
     return False
 
-XML_TOOL_INSTRUCTION = "\n\n**CRITICAL TOOL CALL FORMAT: To use a tool, output `<tool>NAME</tool>` followed by `<json>PARAMS</json>`. Example: `<tool>bash</tool><json>{\"command\":\"ls\"}</json>`. The tool name inside `<tool>` tag is REQUIRED. No text before or after.**"
+XML_TOOL_INSTRUCTION = (
+    "\n\n**CRITICAL TOOL CALL FORMAT: To use a tool, output `<tool>NAME</tool>` followed by `<json>PARAMS</json>`. "
+    "Example: `<tool>bash</tool><json>{\"command\":\"ls\"}</json>`. The tool name inside `<tool>` tag is REQUIRED. No text before or after.**"
+    "\n**VALID TOOLS ONLY: " + ", ".join(sorted(VALID_TOOLS)) + ". Any other tool name = ERROR.**"
+)
 
 def build_prompt(messages: list, tools: list = None) -> str:
     """Build a text prompt from OpenAI-format messages, with optional tool support."""
@@ -988,13 +1146,17 @@ def stream_with_tools(token: str, msgs: list, model: str,
     result = result_container[0]
     text = result.get("text", "")
     tool_calls = _extract_xml_tags(text)
+    # Validate: nếu tool không hợp lệ → bắn lỗi text về cho model tự sửa
+    tool_calls, tool_error = _validate_tool_calls(tool_calls, _get_valid_tool_set(tools))
 
     # Stream reasoning_content if present
     thinking_text = result.get("thinking", "")
     if thinking_text:
         yield make_chunk(completion_id, model, {"role": "assistant", "reasoning_content": thinking_text})
 
-    if tool_calls:
+    if tool_error:
+        yield from _yield_text_stream(completion_id, model, tool_error)
+    elif tool_calls:
         for i, tc in enumerate(tool_calls):
             cid = f"call_{uuid.uuid4().hex[:12]}"
             yield make_tool_call_chunk(completion_id, model, i, cid, name=tc["name"])
@@ -1105,11 +1267,14 @@ def chat_completions():
                 return Response(err_gen(), mimetype="text/event-stream")
             text = result.get("text", "")
             tool_calls = _extract_xml_tags(text)
+            tool_calls, tool_error = _validate_tool_calls(tool_calls, _get_valid_tool_set(tools))
             def tool_stream_gen():
                 thinking_text = result.get("thinking", "")
                 if thinking_text:
                     yield make_chunk(completion_id, model, {"role": "assistant", "reasoning_content": thinking_text})
-                if tool_calls:
+                if tool_error:
+                    yield from _yield_text_stream(completion_id, model, tool_error)
+                elif tool_calls:
                     for i, tc in enumerate(tool_calls):
                         cid = "call_" + uuid.uuid4().hex[:12]
                         yield make_tool_call_chunk(completion_id, model, i, cid, name=tc["name"])
@@ -1166,18 +1331,26 @@ def chat_completions():
             text = result.get("text", "")
             thinking = result.get("thinking", "")
             tool_calls = _extract_xml_tags(text)
-            # Also try parsing from thinking text
-            tool_calls_from_thinking = _extract_xml_tags(thinking)
+            # BUG: Không parse tool call từ thinking!
+            # thinking chứa reasoning nội bộ của model (có thể có XML mẫu, giả lập tool call),
+            # dẫn đến FALSE POSITIVE: bắt nhầm XML không phải tool call thật.
+            # Model đã output tool call chính thức trong text, không cần parse thêm từ thinking.
+            #
+            # tool_calls_from_thinking = _extract_xml_tags(thinking)
+            tool_calls_from_thinking = []  # DISABLED: tránh false positive từ thinking
             all_tool_calls = tool_calls + tool_calls_from_thinking
+            all_tool_calls, tool_error = _validate_tool_calls(all_tool_calls)
             print(f"[stream-notools] text_len={len(text)}, tool_calls={tool_calls}", flush=True)
-            print(f"[stream-notools] thinking_len={len(thinking)}, tool_calls_from_thinking={tool_calls_from_thinking}", flush=True)
+            print(f"[stream-notools] thinking_len={len(thinking)}, tool_calls_from_thinking=DISABLED", flush=True)
             print(f"[stream-notools] text[:300]={repr(text[:300])}", flush=True)
             print(f"[stream-notools] thinking[:300]={repr(thinking[:300])}", flush=True)
             def notools_stream_gen():
                 thinking_text = thinking
                 if thinking_text:
                     yield make_chunk(completion_id, model, {"role": "assistant", "reasoning_content": thinking_text})
-                if all_tool_calls:
+                if tool_error:
+                    yield from _yield_text_stream(completion_id, model, tool_error)
+                elif all_tool_calls:
                     for i, tc in enumerate(all_tool_calls):
                         cid = "call_" + uuid.uuid4().hex[:12]
                         yield make_tool_call_chunk(completion_id, model, i, cid, name=tc["name"])
@@ -1238,7 +1411,14 @@ def chat_completions():
 
     text = result.get("text", "")
     tool_calls = _extract_xml_tags(text)
-    final_text = None if tool_calls else text
+    # Validate: nếu tool không hợp lệ → bắn lỗi text về cho model tự sửa
+    tool_calls, tool_error = _validate_tool_calls(tool_calls, _get_valid_tool_set(tools))
+    if tool_error:
+        final_text = tool_error
+    elif tool_calls:
+        final_text = None
+    else:
+        final_text = text
 
     prompt_tokens     = len(prompt) // 4
     completion_tokens = len(final_text or "") // 4
@@ -1251,7 +1431,7 @@ def chat_completions():
         "choices": [{
             "index":         0,
             "message":       {"role": "assistant", "content": final_text},
-            "finish_reason": "tool_calls" if tool_calls else result.get("finish_reason", "stop"),
+            "finish_reason": "tool_calls" if (tool_calls and not tool_error) else result.get("finish_reason", "stop"),
         }],
         "usage": {
             "prompt_tokens":     prompt_tokens,
