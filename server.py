@@ -335,7 +335,40 @@ def _extract_xml_tags(text: str) -> list:
         tools.append({"name": tool_name, "arguments": args})
     if tools:
         return tools
-    
+
+
+
+    # Format 9: <tool><parameter name="KEY">value</parameter>...</tool> (no name, no name attr)
+    # Infer tool name from parameter keys (command→bash, file_path→read)
+    tool_params_only_pattern = re.compile(
+        r'<tool>\s*(<parameter\s+name\s*=\s*"\w+"[^>]*>\s*.*?\s*</parameter>\s*)+</tool>',
+        re.DOTALL
+    )
+    for match in tool_params_only_pattern.finditer(text):
+        params_block = match.group(0)
+        args = {}
+        param_pattern = re.compile(
+            r'<parameter\s+name\s*=\s*"(\w+)"[^>]*>\s*(.*?)\s*</parameter>',
+            re.DOTALL
+        )
+        for pm in param_pattern.finditer(params_block):
+            pname = pm.group(1)
+            pvalue = pm.group(2).strip()
+            type_match = re.search(r'string\s*=\s*"(true|false)"', pm.group(0))
+            if type_match and type_match.group(1) == "false":
+                try:
+                    pvalue = json.loads(pvalue)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            args[pname] = pvalue
+        tool_name = "unknown"
+        for key, tname in KEY_TO_TOOL.items():
+            if key in args:
+                tool_name = tname
+                break
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
     # Format 3: <tool><name>X</name><parameter ...>value</parameter>...</tool>
     tool_block_pattern = re.compile(
         r'<tool>\s*<name>(\w+)</name>(.*?)</tool>',
@@ -533,6 +566,8 @@ def strip_tool_calls(text: str) -> str:
     text = re.sub(r'<function_call\s+name\s*=\s*"[^"]*"\s*>\s*<args>.*?</args>', '', text, flags=re.DOTALL)
     text = re.sub(r'<tool>\s*<name>\w+</name>.*?</tool>', '', text, flags=re.DOTALL)
     text = re.sub(r'<tool>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
+    # Format 9: <tool><parameter name="KEY">value</parameter>...</tool>
+    text = re.sub(r'<tool>\s*(<parameter\s+name\s*=\s*"\w+"[^>]*>\s*.*?\s*</parameter>\s*)+</tool>', '', text, flags=re.DOTALL)
     # Format 8: <tool name="TOOL"><parameter ...>...</parameter></tool>
     text = re.sub(r'<tool\s+name\s*=\s*"[^"]*"\s*>.*?</tool>', '', text, flags=re.DOTALL)
     tool_names = ['bash', 'read', 'write', 'edit', 'web_search', 'AskUserQuestion', 'UpdatePlan']
