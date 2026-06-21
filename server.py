@@ -291,6 +291,7 @@ def _extract_xml_tags(text: str) -> list:
     5. <tool><tool_call name="X"><parameter name="Y" string="true/false">value</parameter>...</tool_call></tool>
     6. <tool><tool_call>X</tool_call><parameter name="Y">value</parameter>...</tool>
     7. <tool>{JSON}</tool> (raw JSON with name field)
+    8. <tool><tool_name name="X">X</tool_name><json>{...}</json></tool> (deepapi multi-tool)
     """
     # Strip markdown code blocks: XML trong ``` ... ``` là ví dụ, không phải tool call thật
     text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)
@@ -719,6 +720,44 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
+    # Format 13: <tool><tool_name name="X">X</tool_name><json>{...}</json></tool>
+    # CodeAI / deepapi multi-tool XML: tool_name tag with name attribute + json body
+    #   <tool>
+    #     <tool_name name="bash">bash</tool_name>
+    #     <json>{"command":"...","description":"...","sideEffects":[...]}</json>
+    #   </tool>
+    tool_name_tag_json_pattern = re.compile(
+        r'<tool>\s*<tool_name\s+name\s*=\s*"(\w+)"[^>]*>\s*\1\s*</tool_name>\s*<json>(.*?)</json>\s*</tool>',
+        re.DOTALL
+    )
+    for match in tool_name_tag_json_pattern.finditer(text):
+        tool_name = match.group(1)
+        args_str = match.group(2).strip()
+        try:
+            args = json.loads(args_str)
+        except json.JSONDecodeError:
+            args = {}
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
+    # Format 13b: <tool><tool_name name="X">X</tool_name><json>{...}</json> (missing </tool>)
+    # Loose closing: </tool> may be omitted
+    tool_name_tag_json_no_close_pattern = re.compile(
+        r'<tool>\s*<tool_name\s+name\s*=\s*"(\w+)"[^>]*>\s*\1\s*</tool_name>\s*<json>(.*?)</json>',
+        re.DOTALL
+    )
+    for match in tool_name_tag_json_no_close_pattern.finditer(text):
+        tool_name = match.group(1)
+        args_str = match.group(2).strip()
+        try:
+            args = json.loads(args_str)
+        except json.JSONDecodeError:
+            args = {}
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
     # Filter out noise: unknown tool names with empty args (usually XML format examples)
     KNOWN_TOOLS = VALID_TOOLS | {'unknown'}
     tools = [t for t in tools if t['name'] in KNOWN_TOOLS or t['arguments']]
@@ -763,6 +802,8 @@ def strip_tool_calls(text: str) -> str:
     text = re.sub(r'<tool>\s*<tool_call>\w+</tool_call>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
     # Format 11: <tool><tool>NAME</tool><parameter>k</parameter><parameter>v</parameter>...</tool>
     text = re.sub(r'<tool>\s*<tool>\w+</tool>\s*(<parameter>[^<]*</parameter>\s*)+</tool>', '', text, flags=re.DOTALL)
+    # Format 11b: <tool><tool>NAME</tool><parameter>k</parameter><parameter>v</parameter>... (missing </tool>)
+    text = re.sub(r'<tool>\s*<tool>\w+</tool>\s*(<parameter>[^<]*</parameter>\s*)+', '', text, flags=re.DOTALL)
     # Format 8: <tool name="TOOL"><parameter ...>...</parameter></tool>
     text = re.sub(r'<tool\s+name\s*=\s*"[^"]*"\s*>.*?</tool>', '', text, flags=re.DOTALL)
     # Format 10b: <tool><tool_call name="NAME"><parameter ...>...</parameter></tool_call></tool>
@@ -772,6 +813,9 @@ def strip_tool_calls(text: str) -> str:
     # Format 12: <tool>{JSON}</tool> (raw JSON)
     text = re.sub(r'<tool>\s*\{[^}]*\}\s*</tool>', '', text, flags=re.DOTALL)
     text = re.sub(r'<tool>\s*\{.*?\}\s*</tool>', '', text, flags=re.DOTALL)
+    # Format 13: <tool><tool_name name="X">X</tool_name><json>{...}</json></tool>
+    text = re.sub(r'<tool>\s*<tool_name\s+name\s*=\s*"[^"]*"[^>]*>\s*\w+\s*</tool_name>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<tool>\s*<tool_name\s+name\s*=\s*"[^"]*"[^>]*>\s*\w+\s*</tool_name>\s*<json>.*?</json>', '', text, flags=re.DOTALL)
     tool_names = sorted(VALID_TOOLS)  # sync với VALID_TOOLS
     IGN2 = re.DOTALL | re.IGNORECASE
     for tname in tool_names:
