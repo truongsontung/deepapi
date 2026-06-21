@@ -422,6 +422,30 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
+    # Format 5b: <tool><tool_name><param>value</param>...</tool> (no closing tool_name tag)
+    # Variant where </tool> closes both wrapper and inner element.
+    # Example: <tool><bash><command>ls</command><description>list</description></tool>
+    for tname in tool_names:
+        no_close_inner_pattern = re.compile(
+            rf'<tool>\s*<{tname}>(.*?)</tool>',
+            re.DOTALL
+        )
+        for match in no_close_inner_pattern.finditer(text):
+            inner_content = match.group(1)
+            args = {}
+            child_pattern = re.compile(r'<(\w+)>(.*?)</\1>', re.DOTALL)
+            for cm in child_pattern.finditer(inner_content):
+                key = cm.group(1)
+                value = cm.group(2).strip()
+                try:
+                    value = json.loads(value)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                args[key] = value
+            tools.append({"name": tname, "arguments": args})
+    if tools:
+        return tools
+
     # Format 4: Bare tool tags like <bash>...</bash>, <read>...</read>, <write>...</write>
     # These are CodeAI-style: <tool_name>content</tool_name> - no parameters
     for tname in tool_names:
@@ -482,6 +506,23 @@ def _extract_xml_tags(text: str) -> list:
         except json.JSONDecodeError:
             args = {}
         tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
+    # Format 2b: <function_call name="X"><args>JSON</args> (missing </function_call>)
+    # Fallback when DeepSeek forgets the closing function_call tag
+    fc_no_close_pattern = re.compile(
+        r'<function_call\s+name\s*=\s*"(\w+)"\s*>\s*<args>(.*?)</args>',
+        re.DOTALL
+    )
+    for match in fc_no_close_pattern.finditer(text):
+        tool_name = match.group(1)
+        args_str = match.group(2).strip()
+        try:
+            args = json.loads(args_str)
+        except json.JSONDecodeError:
+            args = {}
+        tools.append({"name": tool_name, "arguments": args})
     return tools
 
 
@@ -489,6 +530,7 @@ def strip_tool_calls(text: str) -> str:
     """Remove tool call XML blocks from text."""
     text = re.sub(r'<tool>\s*\w+\s*</tool>\s*<json>.*?</json>', '', text, flags=re.DOTALL)
     text = re.sub(r'<function_call\s+name\s*=\s*"[^"]*"\s*>.*?</function_call>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<function_call\s+name\s*=\s*"[^"]*"\s*>\s*<args>.*?</args>', '', text, flags=re.DOTALL)
     text = re.sub(r'<tool>\s*<name>\w+</name>.*?</tool>', '', text, flags=re.DOTALL)
     text = re.sub(r'<tool>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
     # Format 8: <tool name="TOOL"><parameter ...>...</parameter></tool>
@@ -497,6 +539,7 @@ def strip_tool_calls(text: str) -> str:
     for tname in tool_names:
         text = re.sub(rf'<tool>\s*<{tname}>.*?</{tname}>\s*</tool>', '', text, flags=re.DOTALL)
         text = re.sub(rf'<tool>\s*<{tname}>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
+        text = re.sub(rf'<tool>\s*<{tname}>.*?</tool>', '', text, flags=re.DOTALL)
         text = re.sub(rf'<{tname}>.*?</{tname}>', '', text, flags=re.DOTALL)
     return text.strip()
 
@@ -515,6 +558,7 @@ def _build_tool_system_prompt(tools: list) -> str:
     lines.append("<json>")
     lines.append('{"param1": "value1"}')
     lines.append("</json>")
+    lines.append("Or nested format: <tool><tool_name><param1>value1</param1></tool_name></tool>")
     lines.append("")
     lines.append("Available tools:")
 
