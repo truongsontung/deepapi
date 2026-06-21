@@ -292,6 +292,12 @@ def _extract_xml_tags(text: str) -> list:
     6. <tool><tool_call>X</tool_call><parameter name="Y">value</parameter>...</tool>
     7. <tool>{JSON}</tool> (raw JSON with name field)
     """
+    # Strip markdown code blocks: XML trong ``` ... ``` là ví dụ, không phải tool call thật
+    text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)
+    # Strip inline code chứa tool name ảo (ví dụ từ code parser):
+    # `<tool>name</tool>`, `<name>X</name>`, `<NAME>...</NAME>`, v.v.
+    for fake in ('name', 'NAME', 'X', 'N', 'tool_name', 'TÊN', 'TEN', 'tên_tool'):
+        text = re.sub(rf'`<[^>]*{fake}[^>]*>`', '', text)
     tools = []
     
     # Format 1: <tool>name</tool><json>{...}</json>
@@ -824,6 +830,10 @@ def _build_tool_system_prompt(tools: list) -> str:
     lines.append("CRITICAL: Only use tools listed below. Any other tool name will cause an error.")
     lines.append("Valid tool names: " + ", ".join(sorted(VALID_TOOLS)))
     lines.append("")
+    lines.append("WARNING: Do NOT output tool names copied from code examples you read")
+    lines.append("(like 'name', 'NAME', 'N', 'X', 'tool_name', 'TEN').")
+    lines.append("If you need to explain code, use plain text, NOT tool calls.")
+    lines.append("")
     lines.append("Available tools:")
 
     for t in tools:
@@ -861,6 +871,8 @@ XML_TOOL_INSTRUCTION = (
     "\n\n**CRITICAL TOOL CALL FORMAT: To use a tool, output `<tool>NAME</tool>` followed by `<json>PARAMS</json>`. "
     "Example: `<tool>bash</tool><json>{\"command\":\"ls\"}</json>`. The tool name inside `<tool>` tag is REQUIRED. No text before or after.**"
     "\n**VALID TOOLS ONLY: " + ", ".join(sorted(VALID_TOOLS)) + ". Any other tool name = ERROR.**"
+    "\n**WARNING: Do NOT output tool names copied from code examples you read (like 'name', 'NAME', 'N', 'X', 'tool_name', 'TÊN'). "
+    "Only use tools from the Valid tools list above. If you need to explain code, use plain text, NOT tool calls.**"
 )
 
 def build_prompt(messages: list, tools: list = None) -> str:
