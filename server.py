@@ -524,11 +524,12 @@ def _extract_xml_tags(text: str) -> list:
 
     # Format 6: <tool><tool_name><json>{...}</json></tool_name></tool>
     # CodeAI nested XML with json wrapper: <tool><read><json>{"file_path":"..."}</json></read></tool>
+    IGN = re.DOTALL | re.IGNORECASE  # hỗ trợ <Bash>, <Read>, v.v.
     tool_names = sorted(VALID_TOOLS)  # sync với VALID_TOOLS
     for tname in tool_names:
         json_inner_pattern = re.compile(
             rf'<tool>\s*<{tname}>\s*<json>(.*?)</json>\s*</{tname}>\s*</tool>',
-            re.DOTALL
+            IGN
         )
         for match in json_inner_pattern.finditer(text):
             args_str = match.group(1).strip()
@@ -536,16 +537,16 @@ def _extract_xml_tags(text: str) -> list:
                 args = json.loads(args_str)
             except (json.JSONDecodeError, ValueError):
                 args = {}
-            tools.append({"name": tname, "arguments": args})
+            tools.append({"name": tname.lower(), "arguments": args})
     if tools:
         return tools
 
     # Format 7: <tool><tool_name><json>{...}</json></tool> (missing </tool_name>)
-    # Variant of Format 6: <tool><read><json>{"file_path":"..."}</json></tool>
+    # Variant of Format 6: <tool><read><json>{\"file_path\":\"...\"}</json></tool>
     for tname in tool_names:
         no_close_name_pattern = re.compile(
             rf'<tool>\s*<{tname}>\s*<json>(.*?)</json>\s*</tool>',
-            re.DOTALL
+            IGN
         )
         for match in no_close_name_pattern.finditer(text):
             args_str = match.group(1).strip()
@@ -553,7 +554,7 @@ def _extract_xml_tags(text: str) -> list:
                 args = json.loads(args_str)
             except (json.JSONDecodeError, ValueError):
                 args = {}
-            tools.append({"name": tname, "arguments": args})
+            tools.append({"name": tname.lower(), "arguments": args})
     if tools:
         return tools
 
@@ -562,21 +563,21 @@ def _extract_xml_tags(text: str) -> list:
     for tname in tool_names:
         inner_tool_pattern = re.compile(
             rf'<tool>\s*<{tname}>(.*?)</{tname}>\s*</tool>',
-            re.DOTALL
+            IGN
         )
         for match in inner_tool_pattern.finditer(text):
             inner_content = match.group(1)
             args = {}
-            child_pattern = re.compile(r'<(\w+)>(.*?)</\1>', re.DOTALL)
+            child_pattern = re.compile(r'<(\w+)>(.*?)</\1>', IGN)
             for cm in child_pattern.finditer(inner_content):
-                key = cm.group(1)
+                key = cm.group(1).lower()
                 value = cm.group(2).strip()
                 try:
                     value = json.loads(value)
                 except (json.JSONDecodeError, ValueError):
                     pass
                 args[key] = value
-            tools.append({"name": tname, "arguments": args})
+            tools.append({"name": tname.lower(), "arguments": args})
     if tools:
         return tools
 
@@ -586,21 +587,21 @@ def _extract_xml_tags(text: str) -> list:
     for tname in tool_names:
         no_close_inner_pattern = re.compile(
             rf'<tool>\s*<{tname}>(.*?)</tool>',
-            re.DOTALL
+            IGN
         )
         for match in no_close_inner_pattern.finditer(text):
             inner_content = match.group(1)
             args = {}
-            child_pattern = re.compile(r'<(\w+)>(.*?)</\1>', re.DOTALL)
+            child_pattern = re.compile(r'<(\w+)>(.*?)</\1>', IGN)
             for cm in child_pattern.finditer(inner_content):
-                key = cm.group(1)
+                key = cm.group(1).lower()
                 value = cm.group(2).strip()
                 try:
                     value = json.loads(value)
                 except (json.JSONDecodeError, ValueError):
                     pass
                 args[key] = value
-            tools.append({"name": tname, "arguments": args})
+            tools.append({"name": tname.lower(), "arguments": args})
     if tools:
         return tools
 
@@ -609,7 +610,7 @@ def _extract_xml_tags(text: str) -> list:
     for tname in tool_names:
         bare_pattern = re.compile(
             rf'<{tname}>\s*(.*?)\s*</{tname}>',
-            re.DOTALL
+            IGN
         )
         for match in bare_pattern.finditer(text):
             content = match.group(1).strip()
@@ -618,7 +619,7 @@ def _extract_xml_tags(text: str) -> list:
                 args = json.loads(content)
             except json.JSONDecodeError:
                 args = {"content": content} if content else {}
-            tools.append({"name": tname, "arguments": args})
+            tools.append({"name": tname.lower(), "arguments": args})
     if tools:
         return tools
 
@@ -725,18 +726,28 @@ def _extract_xml_tags(text: str) -> list:
 
 
 def _extract_tool_calls_safe(text: str) -> list:
-    """Extract tool calls, but ignore if text is primarily explanatory.
-    Nếu sau khi strip XML mà text còn >50 ký tự hoặc >15% gốc
-    → đây là văn bản giải thích chứa XML ví dụ, không phải tool call thật.
+    """Extract tool calls, but ignore noise (explanatory text with XML examples).
+    - Tool call có tên hợp lệ → luôn giữ, kể cả khi có text xung quanh.
+    - Tool call fake (noise) → kiểm tra threshold, nếu text thừa quá nhiều thì bỏ.
     """
     tool_calls = _extract_xml_tags(text)
     if not tool_calls:
         return tool_calls
+
+    # Tách tool call hợp lệ vs noise (fake names từ code examples)
+    valid = [tc for tc in tool_calls if tc['name'] in VALID_TOOLS]
+    noise = [tc for tc in tool_calls if tc['name'] not in VALID_TOOLS]
+
+    # Có tool call hợp lệ → luôn trả về, bất kể text xung quanh
+    if valid:
+        return valid
+
+    # Toàn noise → kiểm tra threshold để quyết định có phải text giải thích không
     clean = strip_tool_calls(text).strip()
-    threshold = max(50, len(text) * 0.15)
+    threshold = max(120, len(text) * 0.35)
     if len(clean) > threshold:
-        return []  # text giải thích, bỏ qua tool call
-    return tool_calls
+        return []  # text giải thích dài, XML chỉ là ví dụ
+    return noise
 
 
 def strip_tool_calls(text: str) -> str:
@@ -762,11 +773,12 @@ def strip_tool_calls(text: str) -> str:
     text = re.sub(r'<tool>\s*\{[^}]*\}\s*</tool>', '', text, flags=re.DOTALL)
     text = re.sub(r'<tool>\s*\{.*?\}\s*</tool>', '', text, flags=re.DOTALL)
     tool_names = sorted(VALID_TOOLS)  # sync với VALID_TOOLS
+    IGN2 = re.DOTALL | re.IGNORECASE
     for tname in tool_names:
-        text = re.sub(rf'<tool>\s*<{tname}>.*?</{tname}>\s*</tool>', '', text, flags=re.DOTALL)
-        text = re.sub(rf'<tool>\s*<{tname}>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
-        text = re.sub(rf'<tool>\s*<{tname}>.*?</tool>', '', text, flags=re.DOTALL)
-        text = re.sub(rf'<{tname}>.*?</{tname}>', '', text, flags=re.DOTALL)
+        text = re.sub(rf'<tool>\s*<{tname}>.*?</{tname}>\s*</tool>', '', text, flags=IGN2)
+        text = re.sub(rf'<tool>\s*<{tname}>\s*<json>.*?</json>\s*</tool>', '', text, flags=IGN2)
+        text = re.sub(rf'<tool>\s*<{tname}>.*?</tool>', '', text, flags=IGN2)
+        text = re.sub(rf'<{tname}>.*?</{tname}>', '', text, flags=IGN2)
     return text.strip()
 
 # ============================================================
@@ -802,7 +814,7 @@ def _get_valid_tool_set(tools_param=None):
     return valid
 
 def _validate_tool_calls(tool_calls, valid_set=None):
-    """Validate tool calls. Returns (valid_calls, error_message).
+    """Validate tool calls (case-insensitive). Returns (valid_calls, error_message).
     Nếu có tool name không hợp lệ → trả về list rỗng + thông báo lỗi
     để model biết và tự sửa.
     """
@@ -810,8 +822,14 @@ def _validate_tool_calls(tool_calls, valid_set=None):
         return [], None
     if valid_set is None:
         valid_set = VALID_TOOLS
-    unknown = [tc['name'] for tc in tool_calls if tc['name'] not in valid_set]
-    valid = [tc for tc in tool_calls if tc['name'] in valid_set]
+    # Case-insensitive matching: askuserquestion ↔ AskUserQuestion
+    valid_lower = {name.lower(): name for name in valid_set}
+    unknown = [tc['name'] for tc in tool_calls if tc['name'].lower() not in valid_lower]
+    valid = []
+    for tc in tool_calls:
+        canonical = valid_lower.get(tc['name'].lower())
+        if canonical:
+            valid.append({"name": canonical, "arguments": tc["arguments"]})
     if unknown and not valid:
         # Tất cả tool đều sai → báo lỗi để model sửa
         msg = (
