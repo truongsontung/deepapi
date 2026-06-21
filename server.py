@@ -618,6 +618,10 @@ def _extract_xml_tags(text: str) -> list:
         except json.JSONDecodeError:
             args = {}
         tools.append({"name": tool_name, "arguments": args})
+
+    # Filter out noise: unknown tool names with empty args (usually XML format examples)
+    KNOWN_TOOLS = {'bash','read','write','edit','web_search','AskUserQuestion','UpdatePlan','unknown'}
+    tools = [t for t in tools if t['name'] in KNOWN_TOOLS or t['arguments']]
     return tools
 
 
