@@ -197,36 +197,53 @@ def invalidate_token(token: str = None):
 # ============================================================
 
 app = Flask(__name__)
-# ---- DEBUG LOGGING ----
+# ---- DEBUG LOGGING (tự rotate khi >5MB, giữ lại ~1MB cuối) ----
+DEBUG_LOG_PATH = "/tmp/cli_debug.log"
+DEBUG_LOG_MAX_SIZE = 5 * 1024 * 1024  # 5MB
+DEBUG_LOG_KEEP = 1 * 1024 * 1024      # giữ lại 1MB cuối
+
+def _debug_log(text: str):
+    """Ghi log với auto-rotate: nếu file > MAX_SIZE thì cắt giữ KEEP bytes cuối"""
+    try:
+        if os.path.exists(DEBUG_LOG_PATH) and os.path.getsize(DEBUG_LOG_PATH) > DEBUG_LOG_MAX_SIZE:
+            with open(DEBUG_LOG_PATH, "rb") as f:
+                f.seek(-DEBUG_LOG_KEEP, os.SEEK_END)
+                tail = f.read()
+            with open(DEBUG_LOG_PATH, "wb") as f:
+                f.write(b"[rotated]\n")
+                f.write(tail)
+        with open(DEBUG_LOG_PATH, "a") as f:
+            f.write(text)
+    except Exception:
+        pass  # log lỗi thì bỏ qua, không ảnh hưởng API
+
 @app.before_request
 def log_req():
     if request.path == "/v1/chat/completions" and request.method == "POST":
         body = request.get_json(silent=True) or {}
         msgs = body.get("messages", [])
-        with open("/tmp/cli_debug.log", "a") as f:
-            f.write("\n=== REQ model=%s stream=%s ===\n" % (body.get("model"), body.get("stream")))
-            for m in msgs[-2:]:
-                c = str(m.get("content",""))[:100]
-                f.write("[%s] %s\n" % (m.get("role"), c))
+        _debug_log("\n=== REQ model=%s stream=%s ===\n" % (body.get("model"), body.get("stream")))
+        for m in msgs[-2:]:
+            c = str(m.get("content",""))[:100]
+            _debug_log("[%s] %s\n" % (m.get("role"), c))
 
 @app.after_request
 def log_resp(response):
     if request.path == "/v1/chat/completions" and request.method == "POST":
-        with open("/tmp/cli_debug.log", "a") as f:
-            f.write("RESP status=%s content_type=%s\n" % (response.status, response.content_type))
-            if response.content_type == "application/json":
-                try:
-                    data = response.get_json()
-                    c = data.get("choices",[{}])[0].get("message",{}).get("content","")
-                    tc = data.get("choices",[{}])[0].get("message",{}).get("tool_calls")
-                    f.write("content=%s\n" % repr(c[:200] if c else c))
-                    f.write("tool_calls=%s\n" % tc)
-                except:
-                    f.write("raw=%s\n" % response.get_data()[:200])
-            elif "text/event-stream" in (response.content_type or ""):
-                data = response.get_data()
-                f.write("sse_stream=%s\n" % data[:3000])
-            f.write("---\n")
+        _debug_log("RESP status=%s content_type=%s\n" % (response.status, response.content_type))
+        if response.content_type == "application/json":
+            try:
+                data = response.get_json()
+                c = data.get("choices",[{}])[0].get("message",{}).get("content","")
+                tc = data.get("choices",[{}])[0].get("message",{}).get("tool_calls")
+                _debug_log("content=%s\n" % repr(c[:200] if c else c))
+                _debug_log("tool_calls=%s\n" % tc)
+            except:
+                _debug_log("raw=%s\n" % response.get_data()[:200])
+        elif "text/event-stream" in (response.content_type or ""):
+            data = response.get_data()
+            _debug_log("sse_stream=%s\n" % data[:3000])
+        _debug_log("---\n")
     return response
 
 
@@ -931,6 +948,7 @@ def chat_completions():
                         token = get_active_token(force_refresh=True)
                     except:
                         pass
+                    time.sleep(1.5 * (_attempt + 1))  # delay tăng dần khi rate limit
             if result is None:
                 err = {"error": {"type": "api_error", "message": str(last_err)}}
                 def err_gen():
@@ -990,6 +1008,7 @@ def chat_completions():
                         token = get_active_token(force_refresh=True)
                     except:
                         pass
+                    time.sleep(1.5 * (_attempt + 1))  # delay tăng dần khi rate limit
             if result is None:
                 err = {"error": {"type": "api_error", "message": str(last_err)}}
                 def err_gen():
@@ -1119,6 +1138,29 @@ if __name__ == "__main__":
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "5001"))
     api_key = os.environ.get("API_KEY", "sk-my-secret-key-1")
+
+    # ── Kill old process on this port if any ──
+    import subprocess, signal
+    my_pid = os.getpid()
+    try:
+        out = subprocess.check_output(
+            ["ss", "-tlnpH", f"sport = :{port}"],
+            text=True, timeout=5
+        )
+        for line in out.splitlines():
+            if f":{port}" in line and "pid=" in line:
+                pid_str = line.split("pid=")[-1].split(",")[0].strip()
+                try:
+                    old_pid = int(pid_str)
+                except ValueError:
+                    continue
+                if old_pid != my_pid:
+                    print(f"[startup] Killing old process on port {port} (PID {old_pid})...")
+                    os.kill(old_pid, signal.SIGTERM)
+                    import time as _time
+                    _time.sleep(1)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass  # ss not available or no process on port
 
     print("=" * 50)
     print("DeepSeek API Bridge (Flask) - OpenAI Compatible + Tool Calling")

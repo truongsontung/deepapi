@@ -183,6 +183,11 @@ class PlaywrightWorker(threading.Thread):
                     raise RuntimeError(f"HTTP {result['status']}: {result['body'][:300]}")
                 raw = result['body']
                 if not raw or not raw.strip():
+                    # HTTP 202 Accepted often has empty body - retry after delay
+                    if result['status'] == 202:
+                        raise RuntimeError(
+                            f"HTTP 202 Accepted (empty body) from {url} - retrying after delay"
+                        )
                     raise RuntimeError(
                         f"Empty response body from {url}\n"
                         f"Status: {result['status']}\n"
@@ -195,7 +200,7 @@ class PlaywrightWorker(threading.Thread):
             except Exception as e:
                 last_err = e
                 err_str = str(e).lower()
-                if "destroyed" in err_str or "navigation" in err_str or "loading" in err_str:
+                if "destroyed" in err_str or "navigation" in err_str or "loading" in err_str or "retrying after delay" in err_str:
                     print(f"[browser] Context error ({e}). Đợi {0.5 * (attempt + 1)}s rồi thử lại (lần {attempt+1}/5)...")
                     _time.sleep(0.5 * (attempt + 1))
                     continue
@@ -877,6 +882,12 @@ def parse_sse_lines(lines_iter):
             chunk = json.loads(data_str)
         except json.JSONDecodeError:
             continue
+
+        # ── Check for error events from DeepSeek (e.g. input_exceeds_limit) ──
+        if chunk.get("type") == "error":
+            err_content = chunk.get("content", "Unknown error")
+            err_reason = chunk.get("finish_reason", "")
+            raise RuntimeError(f"DeepSeek error: {err_content}" + (f" ({err_reason})" if err_reason else ""))
             
         if "response_message_id" in chunk:
             yield {"response_message_id": chunk["response_message_id"]}
@@ -994,6 +1005,7 @@ def collect_response(token: str, session_id: str, prompt: str,
     finish_reason  = "stop"
     msg_id         = 0
     last_status    = ""
+    _raw_debug     = []  # capture first few raw lines for debugging
 
     def process(lines_gen):
         nonlocal msg_id, last_status, finish_reason
@@ -1018,13 +1030,23 @@ def collect_response(token: str, session_id: str, prompt: str,
                 else:
                     text_parts.append(v)
 
+    def _fsave(line):
+        """Save raw line to debug buffer"""
+        if len(_raw_debug) < 10:
+            _raw_debug.append(str(line).strip()[:500])
+
     pow_resp = get_pow(token, session=http_session)
     lines = call_completion(
         token=token, session_id=session_id, prompt=prompt,
         model=model, thinking=thinking, search=search,
         pow_response=pow_resp, http_session=http_session,
     )
-    process(lines)
+    # Tee: save raw lines while streaming to process()
+    def _tee(gen):
+        for line in gen:
+            _fsave(line)
+            yield line
+    process(_tee(lines))
 
     for rnd in range(max_continue_rounds):
         if last_status.upper() not in ("INCOMPLETE", "AUTO_CONTINUE"):
@@ -1036,11 +1058,15 @@ def collect_response(token: str, session_id: str, prompt: str,
         cont = call_continue(token, session_id, msg_id,
                              pow_response=pow_resp2, http_session=http_session)
         last_status = ""
-        process(cont)
+        process(_tee(cont))
 
     final_text = "".join(text_parts)
     final_thinking = "".join(thinking_parts)
     if not final_text and not final_thinking:
+        # Log raw first 3 SSE lines để debug
+        import sys
+        raw_info = " | ".join(_raw_debug[:5]) if _raw_debug else "(no raw lines)"
+        print(f"[empty-resp] model={model} status={last_status} msg_id={msg_id} raw={raw_info}", flush=True, file=sys.stderr)
         raise RuntimeError("DeepSeek returned empty response - possible rate limit or bad token")
     return {
         "text":                final_text,
