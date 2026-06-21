@@ -369,6 +369,23 @@ def _extract_xml_tags(text: str) -> list:
         tools.append({"name": tool_name, "arguments": args})
     if tools:
         return tools
+
+    # Format 10: <tool><tool_call>NAME</tool_call><json>{...}</json></tool>
+    tool_call_tag_pattern = re.compile(
+        r'<tool>\s*<tool_call>(\w+)</tool_call>\s*<json>(.*?)</json>\s*</tool>',
+        re.DOTALL
+    )
+    for match in tool_call_tag_pattern.finditer(text):
+        tool_name = match.group(1)
+        args_str = match.group(2).strip()
+        try:
+            args = json.loads(args_str)
+        except json.JSONDecodeError:
+            args = {}
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
     # Format 3: <tool><name>X</name><parameter ...>value</parameter>...</tool>
     tool_block_pattern = re.compile(
         r'<tool>\s*<name>(\w+)</name>(.*?)</tool>',
@@ -568,6 +585,8 @@ def strip_tool_calls(text: str) -> str:
     text = re.sub(r'<tool>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
     # Format 9: <tool><parameter name="KEY">value</parameter>...</tool>
     text = re.sub(r'<tool>\s*(<parameter\s+name\s*=\s*"\w+"[^>]*>\s*.*?\s*</parameter>\s*)+</tool>', '', text, flags=re.DOTALL)
+    # Format 10: <tool><tool_call>NAME</tool_call><json>{...}</json></tool>
+    text = re.sub(r'<tool>\s*<tool_call>\w+</tool_call>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
     # Format 8: <tool name="TOOL"><parameter ...>...</parameter></tool>
     text = re.sub(r'<tool\s+name\s*=\s*"[^"]*"\s*>.*?</tool>', '', text, flags=re.DOTALL)
     tool_names = ['bash', 'read', 'write', 'edit', 'web_search', 'AskUserQuestion', 'UpdatePlan']
