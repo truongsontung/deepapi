@@ -386,6 +386,29 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
+    # Format 11: <tool><tool>NAME</tool><parameter>key</parameter><parameter>val</parameter>...</tool>
+    # Sequential key-value parameter pairs
+    tool_nested_tag_pattern = re.compile(
+        r'<tool>\s*<tool>(\w+)</tool>\s*((?:\s*<parameter>[^<]*</parameter>\s*)+)</tool>',
+        re.DOTALL
+    )
+    for match in tool_nested_tag_pattern.finditer(text):
+        tool_name = match.group(1)
+        params_block = match.group(2)
+        param_values = re.findall(r'<parameter>\s*(.*?)\s*</parameter>', params_block, re.DOTALL)
+        args = {}
+        for i in range(0, len(param_values) - 1, 2):
+            key = param_values[i].strip()
+            val = param_values[i + 1].strip()
+            try:
+                val = json.loads(val)
+            except (json.JSONDecodeError, ValueError):
+                pass
+            args[key] = val
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
     # Format 3: <tool><name>X</name><parameter ...>value</parameter>...</tool>
     tool_block_pattern = re.compile(
         r'<tool>\s*<name>(\w+)</name>(.*?)</tool>',
@@ -587,6 +610,8 @@ def strip_tool_calls(text: str) -> str:
     text = re.sub(r'<tool>\s*(<parameter\s+name\s*=\s*"\w+"[^>]*>\s*.*?\s*</parameter>\s*)+</tool>', '', text, flags=re.DOTALL)
     # Format 10: <tool><tool_call>NAME</tool_call><json>{...}</json></tool>
     text = re.sub(r'<tool>\s*<tool_call>\w+</tool_call>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
+    # Format 11: <tool><tool>NAME</tool><parameter>k</parameter><parameter>v</parameter>...</tool>
+    text = re.sub(r'<tool>\s*<tool>\w+</tool>\s*(<parameter>[^<]*</parameter>\s*)+</tool>', '', text, flags=re.DOTALL)
     # Format 8: <tool name="TOOL"><parameter ...>...</parameter></tool>
     text = re.sub(r'<tool\s+name\s*=\s*"[^"]*"\s*>.*?</tool>', '', text, flags=re.DOTALL)
     tool_names = ['bash', 'read', 'write', 'edit', 'web_search', 'AskUserQuestion', 'UpdatePlan']
