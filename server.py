@@ -790,14 +790,19 @@ def _validate_tool_calls(tool_calls, valid_set=None):
     if valid_set is None:
         valid_set = VALID_TOOLS
     unknown = [tc['name'] for tc in tool_calls if tc['name'] not in valid_set]
-    if unknown:
+    valid = [tc for tc in tool_calls if tc['name'] in valid_set]
+    if unknown and not valid:
+        # Tất cả tool đều sai → báo lỗi để model sửa
         msg = (
             f"TOOL CALL ERROR: Unknown tool(s): {', '.join(unknown)}. "
             f"Valid tools: {', '.join(sorted(valid_set))}. "
             f"Please correct and use only valid tools from the list."
         )
         return [], msg
-    return tool_calls, None
+    if unknown:
+        # Có tool sai lẫn tool đúng → giữ tool đúng, log cảnh báo
+        print(f"[validate] Dropped unknown tools: {unknown}, kept: {[t['name'] for t in valid]}", flush=True)
+    return valid, None
 
 # ============================================================
 # PROMPT BUILDER (with optional tool support)
