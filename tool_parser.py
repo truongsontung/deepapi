@@ -52,6 +52,29 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
+     # Format 1c: <tool>name</tool><json>{...}</tool> (missing </json>)    
+    tool_pattern_no_json_close = re.compile(
+        r'<tool>\s*(\w+)\s*</tool>\s*<json>(.*?)</tool>',
+        re.DOTALL | re.IGNORECASE
+    )
+
+    for match in tool_pattern_no_json_close.finditer(text):
+        tool_name = match.group(1)
+        args_str = match.group(2).strip()
+
+        try:
+            args = json.loads(args_str)
+        except json.JSONDecodeError:
+            args = {}
+
+        tools.append({
+            "name": tool_name,
+            "arguments": args
+        })
+
+    if tools:
+        return tools
+
     # Format 1b: <tool>\n<json>{...}</json> (no tool name, possibly no closing </tool>)
     # Infer tool name from JSON keys
     no_name_pattern = re.compile(
@@ -1012,6 +1035,33 @@ def _extract_xml_tags(text: str) -> list:
 
     if tools:
         return tools
+     # Format [bash] command [/bash]
+    for tname in VALID_TOOLS:
+        bracket_pattern = re.compile(
+            rf'\[{re.escape(tname)}\]\s*(.*?)\s*\[/{re.escape(tname)}\]',
+            re.DOTALL | re.IGNORECASE
+        )
+        for match in bracket_pattern.finditer(text):
+            content = match.group(1).strip()
+ 
+            if tname.lower() == "bash":
+                tools.append({
+                    "name": "bash",
+                    "arguments": {"command": content}
+                })
+            elif tname.lower() == "read":
+                tools.append({
+                    "name": "read",
+                    "arguments": {"file_path": content}
+                })
+            elif tname.lower() == "write":
+                tools.append({
+                    "name": "write",
+                    "arguments": {"content": content}
+                })
+
+    if tools:
+        return tools
     # Filter out noise: unknown tool names with empty args (usually XML format examples)
     KNOWN_TOOLS = VALID_TOOLS | {'unknown'}
     tools = [t for t in tools if t['name'] in KNOWN_TOOLS or t['arguments']]
@@ -1125,6 +1175,23 @@ def strip_tool_calls(text: str) -> str:
         text,
         flags=re.DOTALL | re.IGNORECASE
     )
+    # [bash] ... [/bash]
+    for tname in VALID_TOOLS:
+        text = re.sub(
+            rf'\[{re.escape(tname)}\].*?\[/{re.escape(tname)}\]',
+            '',
+            text,
+            flags=re.DOTALL | re.IGNORECASE
+        )
+
+# [bash] ...
+    for tname in VALID_TOOLS:
+        text = re.sub(
+            rf'\[{re.escape(tname)}\].*',
+            '',
+            text,
+            flags=re.DOTALL | re.IGNORECASE
+        )
     tool_names = sorted(VALID_TOOLS)  # sync với VALID_TOOLS
     IGN2 = re.DOTALL | re.IGNORECASE
     for tname in tool_names:
