@@ -1,10 +1,17 @@
 """
 DeepSeek API Server - Prompt Builder
 """
+import json
 from config import VALID_TOOLS
 import re
 from tool_parser import _get_valid_tool_set, _extract_tool_calls_safe
-
+XML_TOOL_INSTRUCTION = (
+    "\n\n**CRITICAL TOOL CALL FORMAT: To use a tool, output `<tool>NAME</tool>` followed by `<json>PARAMS</json>`. "
+    "Example: `<tool>bash</tool><json>{\"command\":\"ls\"}</json>`. The tool name inside `<tool>` tag is REQUIRED. No text before or after.**"
+    "\n**VALID TOOLS ONLY: " + ", ".join(sorted(VALID_TOOLS)) + ". Any other tool name = ERROR.**"
+    "\n**WARNING: Do NOT output tool names copied from code examples you read (like 'name', 'NAME', 'N', 'X', 'tool_name', 'TÊN'). "
+    "Only use tools from the Valid tools list above. If you need to explain code, use plain text, NOT tool calls.**"
+)
 def _build_tool_system_prompt(tools: list) -> str:
     """Build system prompt fragment describing available tools in XML format."""
     if not tools:
@@ -90,7 +97,23 @@ def build_prompt(messages: list, tools: list = None) -> str:
                 if tool_prompt:
                     parts.append(f"<system>\n{tool_prompt}\n</system>")
                 tool_prompt_inserted = True
+        #elif role == "user":
+           # parts.append(f"Human: {content}")
         elif role == "user":
+            content += """
+
+            IMPORTANT:
+            If you decide to use a tool, output EXACTLY:
+
+            <tool>TOOL_NAME</tool>
+            <json>
+            {"param":"value"}
+            </json>
+
+            Only use valid tool names.
+            Do not invent other formats.
+            If no tool is needed, answer normally.
+            """
             parts.append(f"Human: {content}")
         elif role == "assistant":
             if msg.get("tool_calls"):
