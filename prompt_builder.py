@@ -87,6 +87,7 @@ def build_prompt(messages: list, tools: list = None) -> str:
 
         if role == "system":
             content = str(content).replace("If none of the available skills match, respond with an empty array, i.e. `{\"skillNames\": []}`.", "Neu khong co skill phu hop, hay tra loi tu nhien bang tieng Viet.")
+            content = str(content).replace('Response in JSON format:\n```\n{\n  "skillNames": ["", ...]\n}\n```','')
             if has_implicit_tools and not tool_prompt_inserted:
                 content = content + XML_TOOL_INSTRUCTION
                 tool_prompt_inserted = True
