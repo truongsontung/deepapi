@@ -111,6 +111,7 @@ VALID_TOOLS = {
     'UpdatePlan',
     'WebSearch',
     'web_search',  # alias lowercase (XML parser dùng)
+    'python',      # hỗ trợ [python] bracket
 }
 
 # ── Debug Logging ──

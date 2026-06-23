@@ -35,20 +35,7 @@ def _extract_xml_tags(text: str) -> list:
     for fake in ('name', 'NAME', 'X', 'N', 'tool_name', 'TÊN', 'TEN', 'tên_tool'):
         text = re.sub(rf'`<[^>]*{fake}[^>]*>`', '', text)
     tools = []
-    # Format 26: <tools><tool>...</tool><tool>...</tool></tools>
-    # (multi-tool wrapper, Var 30) — MUST come first (container)
-    tools_wrapper = re.compile(
-        r'<tools>(.*?)</tools>',
-        re.DOTALL  | re.IGNORECASE
-    )
-    for match in tools_wrapper.finditer(text):
-        inner = match.group(1)
-        inner_tools = _extract_xml_tags(inner)
-        tools.extend(inner_tools)
-    if tools:
-        return tools
-
-
+    
     # Format 1: <tool>name</tool><json>{...}</json>
     tool_pattern = re.compile(
         r'<tool>\s*(\w+)\s*</tool>\s*<json>(.*?)</json>',
@@ -64,7 +51,6 @@ def _extract_xml_tags(text: str) -> list:
         tools.append({"name": tool_name, "arguments": args})
     if tools:
         return tools
-
 
      # Format 1c: <tool>name</tool><json>{...}</tool> (missing </json>)    
     tool_pattern_no_json_close = re.compile(
@@ -89,15 +75,75 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
-
-    # Format 2 (legacy): <function_call name="X"><args>JSON</args></function_call>
-    fc_pattern = re.compile(
-        r'<function_call\s+name\s*=\s*"(\w+)"\s*>\s*'
-        r'<args>(.*?)</args>\s*'
-        r'</function_call>',
+    # Format 1b: <tool>\n<json>{...}</json> (no tool name, possibly no closing </tool>)
+    # Infer tool name from JSON keys
+    no_name_pattern = re.compile(
+        r'<tool>\s*<json>(.*?)</json>',
         re.DOTALL  | re.IGNORECASE
     )
-    for match in fc_pattern.finditer(text):
+    KEY_TO_TOOL = {
+        "questions": "AskUserQuestion",
+        "command": "bash",
+        "file_path": "read",
+        "plan": "UpdatePlan",
+        "query": "WebSearch",
+        "old_string": "edit",
+    }
+    for match in no_name_pattern.finditer(text):
+        args_str = match.group(1).strip()
+        try:
+            args = json.loads(args_str)
+        except json.JSONDecodeError:
+            args = {}
+        tool_name = "unknown"
+        for key, tname in KEY_TO_TOOL.items():
+            if key in args:
+                tool_name = tname
+                break
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
+
+
+    # Format 9: <tool><parameter name="KEY">value</parameter>...</tool> (no name, no name attr)
+    # Infer tool name from parameter keys (command→bash, file_path→read)
+    tool_params_only_pattern = re.compile(
+        r'<tool>\s*(<parameter\s+name\s*=\s*"\w+"[^>]*>\s*.*?\s*</parameter>\s*)+</tool>',
+        re.DOTALL  | re.IGNORECASE
+    )
+    for match in tool_params_only_pattern.finditer(text):
+        params_block = match.group(0)
+        args = {}
+        param_pattern = re.compile(
+            r'<parameter\s+name\s*=\s*"(\w+)"[^>]*>\s*(.*?)\s*</parameter>',
+            re.DOTALL  | re.IGNORECASE
+        )
+        for pm in param_pattern.finditer(params_block):
+            pname = pm.group(1)
+            pvalue = pm.group(2).strip()
+            type_match = re.search(r'string\s*=\s*"(true|false)"', pm.group(0))
+            if type_match and type_match.group(1) == "false":
+                try:
+                    pvalue = json.loads(pvalue)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            args[pname] = pvalue
+        tool_name = "unknown"
+        for key, tname in KEY_TO_TOOL.items():
+            if key in args:
+                tool_name = tname
+                break
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
+    # Format 10: <tool><tool_call>NAME</tool_call><json>{...}</json></tool>
+    tool_call_tag_pattern = re.compile(
+        r'<tool>\s*<tool_call>(\w+)</tool_call>\s*<json>(.*?)</json>\s*</tool>',
+        re.DOTALL  | re.IGNORECASE
+    )
+    for match in tool_call_tag_pattern.finditer(text):
         tool_name = match.group(1)
         args_str = match.group(2).strip()
         try:
@@ -108,22 +154,104 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
-
-    # Format 2b: <function_call name="X"><args>JSON</args> (missing </function_call>)
-    # Fallback when DeepSeek forgets the closing function_call tag
-    fc_no_close_pattern = re.compile(
-        r'<function_call\s+name\s*=\s*"(\w+)"\s*>\s*<args>(.*?)</args>',
+    # Format 10b: <tool><tool_call name="NAME"><parameter name="KEY" string="true/false">value</parameter>...</tool_call></tool>
+    tool_call_attr_param_pattern = re.compile(
+        r'<tool>\s*<tool_call\s+name\s*=\s*"(\w+)"\s*>(.*?)</tool_call>\s*</tool>',
         re.DOTALL  | re.IGNORECASE
     )
-    for match in fc_no_close_pattern.finditer(text):
+    for match in tool_call_attr_param_pattern.finditer(text):
         tool_name = match.group(1)
-        args_str = match.group(2).strip()
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = {}
+        params_block = match.group(2)
+        args = {}
+        param_pattern = re.compile(
+            r'<parameter\s+name\s*=\s*"(\w+)"[^>]*>\s*(.*?)\s*</parameter>',
+            re.DOTALL | re.IGNORECASE
+        )
+        for pm in param_pattern.finditer(params_block):
+            pname = pm.group(1)
+            pvalue = pm.group(2).strip()
+            type_match = re.search(r'string\s*=\s*"(true|false)"', pm.group(0))
+            if type_match and type_match.group(1) == "false":
+                try:
+                    pvalue = json.loads(pvalue)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            args[pname] = pvalue
         tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
 
+    # Format 10c: <tool><tool_call>NAME</tool_call><parameter name="KEY">value</parameter>...</tool>
+    tool_call_param_pattern = re.compile(
+        r'<tool>\s*<tool_call>(\w+)</tool_call>\s*((?:\s*<parameter\s+name\s*=\s*"\w+"[^>]*>\s*.*?\s*</parameter>\s*)+)</tool>',
+        re.DOTALL | re.IGNORECASE
+    )
+    for match in tool_call_param_pattern.finditer(text):
+        tool_name = match.group(1)
+        params_block = match.group(2)
+        args = {}
+        param_pattern2 = re.compile(
+            r'<parameter\s+name\s*=\s*"(\w+)"[^>]*>\s*(.*?)\s*</parameter>',
+            re.DOTALL | re.IGNORECASE
+        )
+        for pm in param_pattern2.finditer(params_block):
+            pname = pm.group(1)
+            pvalue = pm.group(2).strip()
+            type_match = re.search(r'string\s*=\s*"(true|false)"', pm.group(0))
+            if type_match and type_match.group(1) == "false":
+                try:
+                    pvalue = json.loads(pvalue)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            args[pname] = pvalue
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
+    # Format 11: <tool><tool>NAME</tool><parameter>key</parameter><parameter>val</parameter>...</tool>
+    # Sequential key-value parameter pairs
+    tool_nested_tag_pattern = re.compile(
+        r'<tool>\s*<tool>(\w+)</tool>\s*((?:\s*<parameter>[^<]*</parameter>\s*)+)</tool>',
+        re.DOTALL  | re.IGNORECASE
+    )
+    for match in tool_nested_tag_pattern.finditer(text):
+        tool_name = match.group(1)
+        params_block = match.group(2)
+        param_values = re.findall(r'<parameter>\s*(.*?)\s*</parameter>', params_block, re.DOTALL)
+        args = {}
+        for i in range(0, len(param_values) - 1, 2):
+            key = param_values[i].strip()
+            val = param_values[i + 1].strip()
+            try:
+                val = json.loads(val)
+            except (json.JSONDecodeError, ValueError):
+                pass
+            args[key] = val
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
+    # Format 11b: <tool><tool>NAME</tool><parameter>...</parameter> (missing </tool>)
+    tool_nested_no_close_pattern = re.compile(
+        r'<tool>\s*<tool>(\w+)</tool>\s*((?:\s*<parameter>[^<]*</parameter>\s*)+)',
+        re.DOTALL  | re.IGNORECASE
+    )
+    for match in tool_nested_no_close_pattern.finditer(text):
+        tool_name = match.group(1)
+        params_block = match.group(2)
+        param_values = re.findall(r'<parameter>\s*(.*?)\s*</parameter>', params_block, re.DOTALL)
+        args = {}
+        for i in range(0, len(param_values) - 1, 2):
+            key = param_values[i].strip()
+            val = param_values[i + 1].strip()
+            try:
+                val = json.loads(val)
+            except (json.JSONDecodeError, ValueError):
+                pass
+            args[key] = val
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
 
     # Format 3: <tool><name>X</name><parameter ...>value</parameter>...</tool>
     tool_block_pattern = re.compile(
@@ -153,7 +281,6 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
-
     # Format 6: <tool><tool_name><json>{...}</json></tool_name></tool>
     # CodeAI nested XML with json wrapper: <tool><read><json>{"file_path":"..."}</json></read></tool>
     IGN = re.DOTALL | re.IGNORECASE  # hỗ trợ <Bash>, <Read>, v.v.
@@ -173,7 +300,6 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
-
     # Format 7: <tool><tool_name><json>{...}</json></tool> (missing </tool_name>)
     # Variant of Format 6: <tool><read><json>{\"file_path\":\"...\"}</json></tool>
     for tname in tool_names:
@@ -190,7 +316,6 @@ def _extract_xml_tags(text: str) -> list:
             tools.append({"name": tname.lower(), "arguments": args})
     if tools:
         return tools
-
 
     # Format 5: <tool><tool_name><param>value</param>...</tool_name></tool>
     # CodeAI nested XML: <tool><bash><command>...</command><description>...</description></bash></tool>
@@ -214,7 +339,6 @@ def _extract_xml_tags(text: str) -> list:
             tools.append({"name": tname.lower(), "arguments": args})
     if tools:
         return tools
-
 
     # Format 5b: <tool><tool_name><param>value</param>...</tool> (no closing tool_name tag)
     # Variant where </tool> closes both wrapper and inner element.
@@ -240,7 +364,6 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
-
     # Format 4: Bare tool tags like <bash>...</bash>, <read>...</read>, <write>...</write>
     # These are CodeAI-style: <tool_name>content</tool_name> - no parameters
     for tname in tool_names:
@@ -258,7 +381,6 @@ def _extract_xml_tags(text: str) -> list:
             tools.append({"name": tname.lower(), "arguments": args})
     if tools:
         return tools
-
 
     # Format 8: <tool name="TOOL"><parameter name="KEY">value</parameter>...</tool>
     tool_attr_pattern = re.compile(
@@ -287,13 +409,14 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
-
-    # Format 10: <tool><tool_call>NAME</tool_call><json>{...}</json></tool>
-    tool_call_tag_pattern = re.compile(
-        r'<tool>\s*<tool_call>(\w+)</tool_call>\s*<json>(.*?)</json>\s*</tool>',
+    # Format 2 (legacy): <function_call name="X"><args>JSON</args></function_call>
+    fc_pattern = re.compile(
+        r'<function_call\s+name\s*=\s*"(\w+)"\s*>\s*'
+        r'<args>(.*?)</args>\s*'
+        r'</function_call>',
         re.DOTALL  | re.IGNORECASE
     )
-    for match in tool_call_tag_pattern.finditer(text):
+    for match in fc_pattern.finditer(text):
         tool_name = match.group(1)
         args_str = match.group(2).strip()
         try:
@@ -304,109 +427,20 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
-
-    # Format 10b: <tool><tool_call name="NAME"><parameter name="KEY" string="true/false">value</parameter>...</tool_call></tool>
-    tool_call_attr_param_pattern = re.compile(
-        r'<tool>\s*<tool_call\s+name\s*=\s*"(\w+)"\s*>(.*?)</tool_call>\s*</tool>',
+    # Format 2b: <function_call name="X"><args>JSON</args> (missing </function_call>)
+    # Fallback when DeepSeek forgets the closing function_call tag
+    fc_no_close_pattern = re.compile(
+        r'<function_call\s+name\s*=\s*"(\w+)"\s*>\s*<args>(.*?)</args>',
         re.DOTALL  | re.IGNORECASE
     )
-    for match in tool_call_attr_param_pattern.finditer(text):
+    for match in fc_no_close_pattern.finditer(text):
         tool_name = match.group(1)
-        params_block = match.group(2)
-        args = {}
-        param_pattern = re.compile(
-            r'<parameter\s+name\s*=\s*"(\w+)"[^>]*>\s*(.*?)\s*</parameter>',
-            re.DOTALL | re.IGNORECASE
-        )
-        for pm in param_pattern.finditer(params_block):
-            pname = pm.group(1)
-            pvalue = pm.group(2).strip()
-            type_match = re.search(r'string\s*=\s*"(true|false)"', pm.group(0))
-            if type_match and type_match.group(1) == "false":
-                try:
-                    pvalue = json.loads(pvalue)
-                except (json.JSONDecodeError, ValueError):
-                    pass
-            args[pname] = pvalue
+        args_str = match.group(2).strip()
+        try:
+            args = json.loads(args_str)
+        except json.JSONDecodeError:
+            args = {}
         tools.append({"name": tool_name, "arguments": args})
-    if tools:
-        return tools
-
-
-    # Format 10c: <tool><tool_call>NAME</tool_call><parameter name="KEY">value</parameter>...</tool>
-    tool_call_param_pattern = re.compile(
-        r'<tool>\s*<tool_call>(\w+)</tool_call>\s*((?:\s*<parameter\s+name\s*=\s*"\w+"[^>]*>\s*.*?\s*</parameter>\s*)+)</tool>',
-        re.DOTALL | re.IGNORECASE
-    )
-    for match in tool_call_param_pattern.finditer(text):
-        tool_name = match.group(1)
-        params_block = match.group(2)
-        args = {}
-        param_pattern2 = re.compile(
-            r'<parameter\s+name\s*=\s*"(\w+)"[^>]*>\s*(.*?)\s*</parameter>',
-            re.DOTALL | re.IGNORECASE
-        )
-        for pm in param_pattern2.finditer(params_block):
-            pname = pm.group(1)
-            pvalue = pm.group(2).strip()
-            type_match = re.search(r'string\s*=\s*"(true|false)"', pm.group(0))
-            if type_match and type_match.group(1) == "false":
-                try:
-                    pvalue = json.loads(pvalue)
-                except (json.JSONDecodeError, ValueError):
-                    pass
-            args[pname] = pvalue
-        tools.append({"name": tool_name, "arguments": args})
-    if tools:
-        return tools
-
-
-    # Format 11: <tool><tool>NAME</tool><parameter>key</parameter><parameter>val</parameter>...</tool>
-    # Sequential key-value parameter pairs
-    tool_nested_tag_pattern = re.compile(
-        r'<tool>\s*<tool>(\w+)</tool>\s*((?:\s*<parameter>[^<]*</parameter>\s*)+)</tool>',
-        re.DOTALL  | re.IGNORECASE
-    )
-    for match in tool_nested_tag_pattern.finditer(text):
-        tool_name = match.group(1)
-        params_block = match.group(2)
-        param_values = re.findall(r'<parameter>\s*(.*?)\s*</parameter>', params_block, re.DOTALL)
-        args = {}
-        for i in range(0, len(param_values) - 1, 2):
-            key = param_values[i].strip()
-            val = param_values[i + 1].strip()
-            try:
-                val = json.loads(val)
-            except (json.JSONDecodeError, ValueError):
-                pass
-            args[key] = val
-        tools.append({"name": tool_name, "arguments": args})
-    if tools:
-        return tools
-
-
-    # Format 11b: <tool><tool>NAME</tool><parameter>...</parameter> (missing </tool>)
-    tool_nested_no_close_pattern = re.compile(
-        r'<tool>\s*<tool>(\w+)</tool>\s*((?:\s*<parameter>[^<]*</parameter>\s*)+)',
-        re.DOTALL  | re.IGNORECASE
-    )
-    for match in tool_nested_no_close_pattern.finditer(text):
-        tool_name = match.group(1)
-        params_block = match.group(2)
-        param_values = re.findall(r'<parameter>\s*(.*?)\s*</parameter>', params_block, re.DOTALL)
-        args = {}
-        for i in range(0, len(param_values) - 1, 2):
-            key = param_values[i].strip()
-            val = param_values[i + 1].strip()
-            try:
-                val = json.loads(val)
-            except (json.JSONDecodeError, ValueError):
-                pass
-            args[key] = val
-        tools.append({"name": tool_name, "arguments": args})
-    if tools:
-        return tools
-
 
     # Format 12: <tool>{JSON}</tool> (raw JSON with name/direct tool call fields)
     # Supports both <tool>{"name":"bash","command":"ls",...}</tool>
@@ -444,7 +478,6 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
-
     # Format 13: <tool><tool_name name="X">X</tool_name><json>{...}</json></tool>
     # CodeAI / deepapi multi-tool XML: tool_name tag with name attribute + json body
     #   <tool>
@@ -466,7 +499,6 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
-
     # Format 13b: <tool><tool_name name="X">X</tool_name><json>{...}</json> (missing </tool>)
     # Loose closing: </tool> may be omitted
     tool_name_tag_json_no_close_pattern = re.compile(
@@ -483,7 +515,6 @@ def _extract_xml_tags(text: str) -> list:
         tools.append({"name": tool_name, "arguments": args})
     if tools:
         return tools
-
 
     # Format 14: <invoke name="NAME"><parameter name="KEY" string="true/false">value</parameter>...</invoke>
     invoke_pattern = re.compile(
@@ -511,7 +542,6 @@ def _extract_xml_tags(text: str) -> list:
         tools.append({"name": tool_name, "arguments": args})
     if tools:
         return tools
-
 
     # Format 14b: <invoke name="NAME"><parameter name="KEY">value</parameter>... (missing </invoke>)
     invoke_no_close_pattern = re.compile(
@@ -541,7 +571,6 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
-
     # Format 15: <tool><tool_name>NAME</tool_name><json>{...}</json></tool>
     # (simple tool_name without name attribute, different from Format 13)
     tool_name_json_pattern = re.compile(
@@ -559,7 +588,6 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
-
     # Format 15b: <tool><tool_name>NAME</tool_name><json>{...}</json> (missing </tool>)
     tool_name_json_no_close_pattern = re.compile(
         r'<tool>\s*<tool_name>(\w+)</tool_name>\s*<json>(.*?)</json>',
@@ -575,7 +603,6 @@ def _extract_xml_tags(text: str) -> list:
         tools.append({"name": tool_name, "arguments": args})
     if tools:
         return tools
-
 
     # Format 16: <tool><invoke name="NAME"><parameter name="KEY">value</parameter>...</invoke></tool>
     # (trip: tool wrapper + invoke + parameters)
@@ -605,7 +632,6 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
-
     # Format 16b: <tool><invoke name="NAME"><parameter>...</parameter></invoke> (missing </tool>)
     tool_invoke_no_close_pattern = re.compile(
         r'<tool>\s*<invoke\s+name\s*=\s*"(\w+)"\s*>(.*?)</invoke>',
@@ -633,14 +659,173 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
-
-    # Format 17: <tool><tool_name>X</tool_name><child1>v1</child1>...</tool>
-    # (tool_name tag + direct child params, Var 2/23) — LAST among tool_name formats
-    tool_name_child_pattern = re.compile(
-        r'<tool>\s*<tool_name>(\w+)</tool_name>(.*?)</tool>',
+    # Format 26: <tools><tool>...</tool><tool>...</tool></tools>
+    # (multi-tool wrapper, Var 30) — MUST come first (container)
+    tools_wrapper = re.compile(
+        r'<tools>(.*?)</tools>',
         re.DOTALL  | re.IGNORECASE
     )
-    for match in tool_name_child_pattern.finditer(text):
+    for match in tools_wrapper.finditer(text):
+        inner = match.group(1)
+        inner_tools = _extract_xml_tags(inner)
+        tools.extend(inner_tools)
+    if tools:
+        return tools
+
+    # Format 23: <tool tool_name="X" json='{...}' />
+    # (self-closing with tool_name + json attrs, Var 14) — before Format 22
+    tool_attr_json_selfclose = re.compile(
+        r"""<tool\s+tool_name\s*=\s*(?:"(\w+)"|'(\w+)')\s+"""
+        r"""json\s*=\s*(?:"([^"]*)"|'([^']*)')\s*/>""",
+        re.DOTALL  | re.IGNORECASE
+    )
+    for match in tool_attr_json_selfclose.finditer(text):
+        tool_name = match.group(1) or match.group(2)
+        json_str = match.group(3) or match.group(4)
+        try:
+            args = json.loads(json_str)
+        except json.JSONDecodeError:
+            args = {}
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
+    # Format 24: <tool name="X" params='{...}' />
+    # (self-closing with name + params attrs, Var 7) — before Format 22
+    tool_name_params_selfclose = re.compile(
+        r"""<tool\s+name\s*=\s*(?:"(\w+)"|'(\w+)')\s+"""
+        r"""params\s*=\s*(?:"([^"]*)"|'([^']*)')\s*/>""",
+        re.DOTALL  | re.IGNORECASE
+    )	
+    for match in tool_name_params_selfclose.finditer(text):
+        tool_name = match.group(1) or match.group(2)
+        params_str = match.group(3) or match.group(4)
+        try:
+            args = json.loads(params_str)
+        except json.JSONDecodeError:
+            args = {}
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
+    # Format 22: <tool name="X" attr1="v1" attr2="v2" />
+    # (attribute-only self-closing, Var 3)
+    tool_attr_selfclose = re.compile(
+        r'<tool\s+([^>]+?)\s*/>',
+        re.DOTALL  | re.IGNORECASE
+    )
+    for match in tool_attr_selfclose.finditer(text):
+        attrs_str = match.group(1)
+        attr_pat = re.compile(r"""(\w+)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
+        attrs = {}
+        for am in attr_pat.finditer(attrs_str):
+            akey = am.group(1)
+            aval = am.group(2) if am.group(2) is not None else am.group(3)
+            attrs[akey] = aval
+        if 'name' in attrs:
+            tool_name = attrs.pop('name')
+            tools.append({"name": tool_name, "arguments": attrs})
+        else:
+            for key, tname in KEY_TO_TOOL.items():
+                if key in attrs:
+                    tools.append({"name": tname, "arguments": attrs})
+                    break
+    if tools:
+        return tools
+
+    # Format 25: <invoke name="X" attr1="v1" attr2="v2" />
+    # (invoke self-closing with inline attrs, Var 12)
+    invoke_attr_selfclose = re.compile(
+        r'<invoke\s+([^>]+?)\s*/>',
+        re.DOTALL  | re.IGNORECASE
+    )
+    for match in invoke_attr_selfclose.finditer(text):
+        attrs_str = match.group(1)
+        attr_pat = re.compile(r"""(\w+)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
+        attrs = {}
+        for am in attr_pat.finditer(attrs_str):
+            akey = am.group(1)
+            aval = am.group(2) if am.group(2) is not None else am.group(3)
+            attrs[akey] = aval
+        if 'name' in attrs:
+            tool_name = attrs.pop('name')
+            tools.append({"name": tool_name, "arguments": attrs})
+    if tools:
+        return tools
+
+    # Format 19: <tool tool_name="X"><json>{...}</json></tool>
+    # (tool_name as attribute + json child, Var 17)
+    tool_attr_json_pattern = re.compile(
+        r'<tool\s+tool_name\s*=\s*"(\w+)"\s*>\s*<json>(.*?)</json>\s*</tool>',
+        re.DOTALL  | re.IGNORECASE
+    )
+    for match in tool_attr_json_pattern.finditer(text):
+        tool_name = match.group(1)
+        args_str = match.group(2).strip()
+        try:
+            args = json.loads(args_str)
+        except json.JSONDecodeError:
+            args = {}
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
+    # Format 19b: <tool tool_name="X"><json>{...}</json> (missing </tool>)
+    tool_attr_json_no_close = re.compile(
+        r'<tool\s+tool_name\s*=\s*"(\w+)"\s*>\s*<json>(.*?)</json>',
+        re.DOTALL  | re.IGNORECASE
+    )
+    for match in tool_attr_json_no_close.finditer(text):
+        tool_name = match.group(1)
+        args_str = match.group(2).strip()
+        try:
+            args = json.loads(args_str)
+        except json.JSONDecodeError:
+            args = {}
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
+    # Format 20: <tool><tool_name>X</tool_name><input>{JSON}</input></tool>
+    # (<input> instead of <json>, Var 22) — before Format 17
+    tool_input_pattern = re.compile(
+        r'<tool>\s*<tool_name>(\w+)</tool_name>\s*<input>(.*?)</input>\s*</tool>',
+        re.DOTALL  | re.IGNORECASE
+    )
+    for match in tool_input_pattern.finditer(text):
+        tool_name = match.group(1)
+        args_str = match.group(2).strip()
+        try:
+            args = json.loads(args_str)
+        except json.JSONDecodeError:
+            args = {}
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
+    # Format 20b: <tool><tool_name>X</tool_name><input>{JSON}</input> (missing </tool>)
+    tool_input_no_close = re.compile(
+        r'<tool>\s*<tool_name>(\w+)</tool_name>\s*<input>(.*?)</input>',
+        re.DOTALL  | re.IGNORECASE
+    )
+    for match in tool_input_no_close.finditer(text):
+        tool_name = match.group(1)
+        args_str = match.group(2).strip()
+        try:
+            args = json.loads(args_str)
+        except json.JSONDecodeError:
+            args = {}
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
+    # Format 21: <tool><tool_name>X</tool_name><arguments><child>v</child></arguments></tool>
+    # (<arguments> wrapper, Var 5) — before Format 17
+    tool_args_pattern = re.compile(
+        r'<tool>\s*<tool_name>(\w+)</tool_name>\s*<arguments>(.*?)</arguments>\s*</tool>',
+        re.DOTALL  | re.IGNORECASE
+    )
+    for match in tool_args_pattern.finditer(text):
         tool_name = match.group(1)
         inner = match.group(2)
         args = {}
@@ -657,13 +842,12 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
-
-    # Format 17b: <tool><tool_name>X</tool_name><child>v</child>... (missing </tool>)
-    tool_name_child_no_close = re.compile(
-        r'<tool>\s*<tool_name>(\w+)</tool_name>((?:\s*<\w+>[^<]*</\w+>\s*)+)',
-        re.DOTALL  | re.IGNORECASE
+    # Format 21b: <tool><tool_name>X</tool_name><arguments>...</arguments> (missing </tool>)
+    tool_args_no_close = re.compile(
+        r'<tool>\s*<tool_name>(\w+)</tool_name>\s*<arguments>(.*?)</arguments>',
+        re.DOTALL
     )
-    for match in tool_name_child_no_close.finditer(text):
+    for match in tool_args_no_close.finditer(text):
         tool_name = match.group(1)
         inner = match.group(2)
         if re.search(r'</tool>', text[match.end():match.end()+10]):
@@ -708,7 +892,6 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
-
     # Format 18b: <tool><tool_name>X</tool_name><parameter...>... (missing </tool>)
     tool_name_param_no_close = re.compile(
         r'<tool>\s*<tool_name>(\w+)</tool_name>\s*'
@@ -736,84 +919,13 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
-
-    # Format 19: <tool tool_name="X"><json>{...}</json></tool>
-    # (tool_name as attribute + json child, Var 17)
-    tool_attr_json_pattern = re.compile(
-        r'<tool\s+tool_name\s*=\s*"(\w+)"\s*>\s*<json>(.*?)</json>\s*</tool>',
+    # Format 17: <tool><tool_name>X</tool_name><child1>v1</child1>...</tool>
+    # (tool_name tag + direct child params, Var 2/23) — LAST among tool_name formats
+    tool_name_child_pattern = re.compile(
+        r'<tool>\s*<tool_name>(\w+)</tool_name>(.*?)</tool>',
         re.DOTALL  | re.IGNORECASE
     )
-    for match in tool_attr_json_pattern.finditer(text):
-        tool_name = match.group(1)
-        args_str = match.group(2).strip()
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = {}
-        tools.append({"name": tool_name, "arguments": args})
-    if tools:
-        return tools
-
-
-    # Format 19b: <tool tool_name="X"><json>{...}</json> (missing </tool>)
-    tool_attr_json_no_close = re.compile(
-        r'<tool\s+tool_name\s*=\s*"(\w+)"\s*>\s*<json>(.*?)</json>',
-        re.DOTALL  | re.IGNORECASE
-    )
-    for match in tool_attr_json_no_close.finditer(text):
-        tool_name = match.group(1)
-        args_str = match.group(2).strip()
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = {}
-        tools.append({"name": tool_name, "arguments": args})
-    if tools:
-        return tools
-
-
-    # Format 20: <tool><tool_name>X</tool_name><input>{JSON}</input></tool>
-    # (<input> instead of <json>, Var 22) — before Format 17
-    tool_input_pattern = re.compile(
-        r'<tool>\s*<tool_name>(\w+)</tool_name>\s*<input>(.*?)</input>\s*</tool>',
-        re.DOTALL  | re.IGNORECASE
-    )
-    for match in tool_input_pattern.finditer(text):
-        tool_name = match.group(1)
-        args_str = match.group(2).strip()
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = {}
-        tools.append({"name": tool_name, "arguments": args})
-    if tools:
-        return tools
-
-
-    # Format 20b: <tool><tool_name>X</tool_name><input>{JSON}</input> (missing </tool>)
-    tool_input_no_close = re.compile(
-        r'<tool>\s*<tool_name>(\w+)</tool_name>\s*<input>(.*?)</input>',
-        re.DOTALL  | re.IGNORECASE
-    )
-    for match in tool_input_no_close.finditer(text):
-        tool_name = match.group(1)
-        args_str = match.group(2).strip()
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = {}
-        tools.append({"name": tool_name, "arguments": args})
-    if tools:
-        return tools
-
-
-    # Format 21: <tool><tool_name>X</tool_name><arguments><child>v</child></arguments></tool>
-    # (<arguments> wrapper, Var 5) — before Format 17
-    tool_args_pattern = re.compile(
-        r'<tool>\s*<tool_name>(\w+)</tool_name>\s*<arguments>(.*?)</arguments>\s*</tool>',
-        re.DOTALL  | re.IGNORECASE
-    )
-    for match in tool_args_pattern.finditer(text):
+    for match in tool_name_child_pattern.finditer(text):
         tool_name = match.group(1)
         inner = match.group(2)
         args = {}
@@ -830,13 +942,12 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
-
-    # Format 21b: <tool><tool_name>X</tool_name><arguments>...</arguments> (missing </tool>)
-    tool_args_no_close = re.compile(
-        r'<tool>\s*<tool_name>(\w+)</tool_name>\s*<arguments>(.*?)</arguments>',
-        re.DOTALL
+    # Format 17b: <tool><tool_name>X</tool_name><child>v</child>... (missing </tool>)
+    tool_name_child_no_close = re.compile(
+        r'<tool>\s*<tool_name>(\w+)</tool_name>((?:\s*<\w+>[^<]*</\w+>\s*)+)',
+        re.DOTALL  | re.IGNORECASE
     )
-    for match in tool_args_no_close.finditer(text):
+    for match in tool_name_child_no_close.finditer(text):
         tool_name = match.group(1)
         inner = match.group(2)
         if re.search(r'</tool>', text[match.end():match.end()+10]):
@@ -854,159 +965,22 @@ def _extract_xml_tags(text: str) -> list:
         tools.append({"name": tool_name, "arguments": args})
     if tools:
         return tools
-
-
-    # Format 22: <tool name="X" attr1="v1" attr2="v2" />
-    # (attribute-only self-closing, Var 3)
-    tool_attr_selfclose = re.compile(
-        r'<tool\s+([^>]+?)\s*/>',
-        re.DOTALL  | re.IGNORECASE
+    # Format A: <tool>NAME</tool><json>{...}</json>
+    tool_tag_json_pattern = re.compile(
+        r'<tool>\s*(\w+)\s*</tool>\s*<json>(.*?)</json>',
+        re.DOTALL | re.IGNORECASE
     )
-    for match in tool_attr_selfclose.finditer(text):
-        attrs_str = match.group(1)
-        attr_pat = re.compile(r"""(\w+)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
-        attrs = {}
-        for am in attr_pat.finditer(attrs_str):
-            akey = am.group(1)
-            aval = am.group(2) if am.group(2) is not None else am.group(3)
-            attrs[akey] = aval
-        if 'name' in attrs:
-            tool_name = attrs.pop('name')
-            tools.append({"name": tool_name, "arguments": attrs})
-        else:
-            for key, tname in KEY_TO_TOOL.items():
-                if key in attrs:
-                    tools.append({"name": tname, "arguments": attrs})
-                    break
-    if tools:
-        return tools
-
-
-    # Format 23: <tool tool_name="X" json='{...}' />
-    # (self-closing with tool_name + json attrs, Var 14) — before Format 22
-    tool_attr_json_selfclose = re.compile(
-        r"""<tool\s+tool_name\s*=\s*(?:"(\w+)"|'(\w+)')\s+"""
-        r"""json\s*=\s*(?:"([^"]*)"|'([^']*)')\s*/>""",
-        re.DOTALL  | re.IGNORECASE
-    )
-    for match in tool_attr_json_selfclose.finditer(text):
-        tool_name = match.group(1) or match.group(2)
-        json_str = match.group(3) or match.group(4)
-        try:
-            args = json.loads(json_str)
-        except json.JSONDecodeError:
-            args = {}
-        tools.append({"name": tool_name, "arguments": args})
-    if tools:
-        return tools
-
-
-    # Format 24: <tool name="X" params='{...}' />
-    # (self-closing with name + params attrs, Var 7) — before Format 22
-    tool_name_params_selfclose = re.compile(
-        r"""<tool\s+name\s*=\s*(?:"(\w+)"|'(\w+)')\s+"""
-        r"""params\s*=\s*(?:"([^"]*)"|'([^']*)')\s*/>""",
-        re.DOTALL  | re.IGNORECASE
-    )	
-    for match in tool_name_params_selfclose.finditer(text):
-        tool_name = match.group(1) or match.group(2)
-        params_str = match.group(3) or match.group(4)
-        try:
-            args = json.loads(params_str)
-        except json.JSONDecodeError:
-            args = {}
-        tools.append({"name": tool_name, "arguments": args})
-    if tools:
-        return tools
-
-
-    # Format 25: <invoke name="X" attr1="v1" attr2="v2" />
-    # (invoke self-closing with inline attrs, Var 12)
-    invoke_attr_selfclose = re.compile(
-        r'<invoke\s+([^>]+?)\s*/>',
-        re.DOTALL  | re.IGNORECASE
-    )
-    for match in invoke_attr_selfclose.finditer(text):
-        attrs_str = match.group(1)
-        attr_pat = re.compile(r"""(\w+)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
-        attrs = {}
-        for am in attr_pat.finditer(attrs_str):
-            akey = am.group(1)
-            aval = am.group(2) if am.group(2) is not None else am.group(3)
-            attrs[akey] = aval
-        if 'name' in attrs:
-            tool_name = attrs.pop('name')
-            tools.append({"name": tool_name, "arguments": attrs})
-    if tools:
-        return tools
-
-
-    # Format 1b: <tool>\n<json>{...}</json> (no tool name, possibly no closing </tool>)
-    # Infer tool name from JSON keys
-    no_name_pattern = re.compile(
-        r'<tool>\s*<json>(.*?)</json>',
-        re.DOTALL  | re.IGNORECASE
-    )
-    KEY_TO_TOOL = {
-        "questions": "AskUserQuestion",
-        "command": "bash",
-        "file_path": "read",
-        "plan": "UpdatePlan",
-        "query": "WebSearch",
-        "old_string": "edit",
-    }
-    for match in no_name_pattern.finditer(text):
-        args_str = match.group(1).strip()
+    for match in tool_tag_json_pattern.finditer(text):
+        tool_name = match.group(1)
+        args_str = match.group(2).strip()
         try:
             args = json.loads(args_str)
         except json.JSONDecodeError:
             args = {}
-        tool_name = "unknown"
-        for key, tname in KEY_TO_TOOL.items():
-            if key in args:
-                tool_name = tname
-                break
         tools.append({"name": tool_name, "arguments": args})
     if tools:
         return tools
-
-
-
-
-    # Format 9: <tool><parameter name="KEY">value</parameter>...</tool> (no name, no name attr)
-    # Infer tool name from parameter keys (command→bash, file_path→read)
-    tool_params_only_pattern = re.compile(
-        r'<tool>\s*(<parameter\s+name\s*=\s*"\w+"[^>]*>\s*.*?\s*</parameter>\s*)+</tool>',
-        re.DOTALL  | re.IGNORECASE
-    )
-    for match in tool_params_only_pattern.finditer(text):
-        params_block = match.group(0)
-        args = {}
-        param_pattern = re.compile(
-            r'<parameter\s+name\s*=\s*"(\w+)"[^>]*>\s*(.*?)\s*</parameter>',
-            re.DOTALL  | re.IGNORECASE
-        )
-        for pm in param_pattern.finditer(params_block):
-            pname = pm.group(1)
-            pvalue = pm.group(2).strip()
-            type_match = re.search(r'string\s*=\s*"(true|false)"', pm.group(0))
-            if type_match and type_match.group(1) == "false":
-                try:
-                    pvalue = json.loads(pvalue)
-                except (json.JSONDecodeError, ValueError):
-                    pass
-            args[pname] = pvalue
-        tool_name = "unknown"
-        for key, tname in KEY_TO_TOOL.items():
-            if key in args:
-                tool_name = tname
-                break
-        tools.append({"name": tool_name, "arguments": args})
-    if tools:
-        return tools
-
-
-    # Format B: [json] {"tool":"read", ...}
+       # Format B: [json] {"tool":"read", ...}
     json_block_pattern = re.compile(
         r'\[json\]\s*(\{.*?\})',
         re.DOTALL | re.IGNORECASE
@@ -1023,10 +997,9 @@ def _extract_xml_tags(text: str) -> list:
 
     if tools:
         return tools
-
-    # Format 27: [bash]...[/bash]  [read]...[/read] ...
+        # Format 27: [bash]...[/bash]  [read]...[/read] ...
     bracket_tool_pattern = re.compile(
-        r'\[(bash|read|write|edit|AskUserQuestion|UpdatePlan|WebSearch|web_search|python)\]\s*(.*?)\s*\[/\1\]',
+        r'\[(bash|read|write|edit|AskUserQuestion|UpdatePlan|WebSearch|web_search)\]\s*(.*?)\s*\[/\1\]',
         re.DOTALL | re.IGNORECASE
     )
 
@@ -1051,9 +1024,6 @@ def _extract_xml_tags(text: str) -> list:
         elif tool_name.lower() == "askuserquestion":
             args = {"question": content}
 
-        elif tool_name.lower() == "python":
-            args = {"script": content}
-
         tools.append({
             "name": tool_name,
             "arguments": args
@@ -1061,10 +1031,9 @@ def _extract_xml_tags(text: str) -> list:
 
     if tools:
         return tools
-
-    # Format 27b: [bash]...   (missing closing tag)
+        # Format 27b: [bash]...   (missing closing tag)
     bracket_tool_no_close = re.compile(
-        r'\[(bash|read|write|edit|AskUserQuestion|UpdatePlan|WebSearch|web_search|python)\]\s*(.+)$',
+        r'\[(bash|read|write|edit|AskUserQuestion|UpdatePlan|WebSearch|web_search)\]\s*(.+)$',
         re.DOTALL | re.IGNORECASE
     )
 
@@ -1089,9 +1058,6 @@ def _extract_xml_tags(text: str) -> list:
         elif tool_name.lower() == "askuserquestion":
             args = {"question": content}
 
-        elif tool_name.lower() == "python":
-            args = {"script": content}
-
         tools.append({
             "name": tool_name,
             "arguments": args
@@ -1099,7 +1065,36 @@ def _extract_xml_tags(text: str) -> list:
 
     if tools:
         return tools
+     # Format [bash] command [/bash]
+    for tname in VALID_TOOLS:
+        bracket_pattern = re.compile(
+            rf'\[{re.escape(tname)}\]\s*(.*?)\s*\[/{re.escape(tname)}\]',
+            re.DOTALL | re.IGNORECASE
+        )
+        for match in bracket_pattern.finditer(text):
+            content = match.group(1).strip()
+ 
+            if tname.lower() == "bash":
+                tools.append({
+                    "name": "bash",
+                    "arguments": {"command": content}
+                })
+            elif tname.lower() == "read":
+                tools.append({
+                    "name": "read",
+                    "arguments": {"file_path": content}
+                })
+            elif tname.lower() == "write":
+                tools.append({
+                    "name": "write",
+                    "arguments": {"content": content}
+                })
 
+    if tools:
+        return tools
+    # Filter out noise: unknown tool names with empty args (usually XML format examples)
+    KNOWN_TOOLS = VALID_TOOLS | {'unknown'}
+    tools = [t for t in tools if t['name'] in KNOWN_TOOLS or t['arguments']]
     return tools
 
 def _extract_tool_calls_safe(text: str) -> list:
@@ -1219,7 +1214,7 @@ def strip_tool_calls(text: str) -> str:
             flags=re.DOTALL | re.IGNORECASE
         )
 
-    # [bash] ...
+# [bash] ...
     for tname in VALID_TOOLS:
         text = re.sub(
             rf'\[{re.escape(tname)}\].*',
