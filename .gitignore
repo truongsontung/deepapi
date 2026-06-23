@@ -6,3 +6,5 @@ server_old.py
 server_tmp.py
 server.log
 .DS_Store
+images/
+IMAGE_GUIDE.md
