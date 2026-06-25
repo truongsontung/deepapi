@@ -1101,6 +1101,23 @@ def _extract_xml_tags(text: str) -> list:
     if tools:
         return tools
 
+    # Format 28: tool: NAME {"key": "val"} (plain text, no XML tags)
+    # Ví dụ: 'tôi sẽ đọc file tool: read {"file_path": "home/vps2/xxx"}'
+    tool_colon_pattern = re.compile(
+        r'(?:^|\s)tool\s*:\s*(\w+)\s*(\{.*?\})',
+        re.DOTALL | re.IGNORECASE
+    )
+    for match in tool_colon_pattern.finditer(text):
+        tool_name = match.group(1)
+        args_str = match.group(2)
+        try:
+            args = json.loads(args_str)
+        except (json.JSONDecodeError, ValueError):
+            args = {}
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
     return tools
 
 def _extract_tool_calls_safe(text: str) -> list:
@@ -1218,6 +1235,8 @@ def strip_tool_calls(text: str) -> str:
         text = re.sub(rf'<tool>\s*<{tname}>\s*<json>.*?</json>\s*</tool>', '', text, flags=IGN2)
         text = re.sub(rf'<tool>\s*<{tname}>.*?</tool>', '', text, flags=IGN2)
         text = re.sub(rf'<{tname}>.*?</{tname}>', '', text, flags=IGN2)
+    # Format 28: tool: NAME {"key": "val"} (plain text, no XML)
+    text = re.sub(r'(?:^|\s)tool\s*:\s*\w+\s*\{.*?\}', '', text, flags=re.DOTALL | re.IGNORECASE)
     return text.strip()
     text = re.sub(r'<tool>\s*\w+\s*</tool>\s*<json>.*?</json>', '', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'\[json\]\s*\{.*?"tool"\s*:\s*"[^"]*".*?\}', '', text, flags=re.DOTALL | re.IGNORECASE)
