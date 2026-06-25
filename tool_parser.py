@@ -1104,28 +1104,11 @@ def _extract_xml_tags(text: str) -> list:
     return tools
 
 def _extract_tool_calls_safe(text: str) -> list:
-    """Extract tool calls, but ignore noise (explanatory text with XML examples).
-    - Tool call có tên hợp lệ → luôn giữ, kể cả khi có text xung quanh.
-    - Tool call fake (noise) → kiểm tra threshold, nếu text thừa quá nhiều thì bỏ.
-    """
+    """Extract tool calls, return all valid XML tool tags found (no validation)."""
     tool_calls = _extract_xml_tags(text)
     if not tool_calls:
         return tool_calls
-
-    # Tách tool call hợp lệ vs noise (fake names từ code examples)
-    valid = [tc for tc in tool_calls if tc['name'] in VALID_TOOLS]
-    noise = [tc for tc in tool_calls if tc['name'] not in VALID_TOOLS]
-
-    # Có tool call hợp lệ → luôn trả về, bất kể text xung quanh
-    if valid:
-        return valid
-
-    # Toàn noise → kiểm tra threshold để quyết định có phải text giải thích không
-    clean = strip_tool_calls(text).strip()
-    threshold = max(120, len(text) * 0.35)
-    if len(clean) > threshold:
-        return []  # text giải thích dài, XML chỉ là ví dụ
-    return noise
+    return tool_calls
 
 def strip_tool_calls(text: str) -> str:
     """Remove tool call XML blocks from text."""
@@ -1258,32 +1241,7 @@ def _get_valid_tool_set(tools_param=None):
     return valid
 
 def _validate_tool_calls(tool_calls, valid_set=None):
-    """Validate tool calls (case-insensitive). Returns (valid_calls, error_message).
-    Nếu có tool name không hợp lệ → trả về list rỗng + thông báo lỗi
-    để model biết và tự sửa.
-    """
     if not tool_calls:
         return [], None
-    if valid_set is None:
-        valid_set = VALID_TOOLS
-    # Case-insensitive matching: askuserquestion ↔ AskUserQuestion
-    valid_lower = {name.lower(): name for name in valid_set}
-    unknown = [tc['name'] for tc in tool_calls if tc['name'].lower() not in valid_lower]
-    valid = []
-    for tc in tool_calls:
-        canonical = valid_lower.get(tc['name'].lower())
-        if canonical:
-            valid.append({"name": canonical, "arguments": tc["arguments"]})
-    if unknown and not valid:
-        # Tất cả tool đều sai → báo lỗi để model sửa
-        msg = (
-            f"TOOL CALL ERROR: Unknown tool(s): {', '.join(unknown)}. "
-            f"Valid tools: {', '.join(sorted(valid_set))}. "
-            f"Please correct and use only valid tools from the list."
-        )
-        return [], msg
-    if unknown:
-        # Có tool sai lẫn tool đúng → giữ tool đúng, log cảnh báo
-        print(f"[validate] Dropped unknown tools: {unknown}, kept: {[t['name'] for t in valid]}", flush=True)
-    return valid, None
+    return tool_calls, None
 

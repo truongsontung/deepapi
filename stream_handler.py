@@ -155,12 +155,12 @@ def stream_with_tools(token: str, msgs: list, model: str,
 
     if error_container:
         invalidate_token(token)
-        err = {"error": {"type": "api_error", "message": str(error_container[0]) + account_prefix}}
+        err = {"error": {"type": "api_error", "message": str(error_container[0])}}
         yield f"data: {json.dumps(err)}\n\n"
         return
 
     if not result_container:
-        err = {"error": {"type": "api_error", "message": "Request timed out" + account_prefix}}
+        err = {"error": {"type": "api_error", "message": "Request timed out"}}
         yield f"data: {json.dumps(err)}\n\n"
         return
 
@@ -173,23 +173,23 @@ def stream_with_tools(token: str, msgs: list, model: str,
     # Stream reasoning_content if present
     thinking_text = result.get("thinking", "")
     if thinking_text:
-        yield make_chunk(completion_id, model, {"role": "assistant", "reasoning_content": thinking_text + account_prefix})
+        yield make_chunk(completion_id, model, {"role": "assistant", "reasoning_content": thinking_text})
 
     if tool_error:
-        yield from _yield_text_stream(completion_id, model, tool_error + account_prefix)
+        yield from _yield_text_stream(completion_id, model, tool_error + " " + account_prefix)
     elif tool_calls:
         for i, tc in enumerate(tool_calls):
             cid = f"call_{uuid.uuid4().hex[:12]}"
-            yield make_tool_call_chunk(completion_id, model, i, cid, name=tc["name"], account_prefix=account_prefix)
+            yield make_tool_call_chunk(completion_id, model, i, cid, name=tc["name"])
             args = json.dumps(tc["arguments"], ensure_ascii=False)
-            yield make_tool_call_chunk(completion_id, model, i, "", arguments=args, account_prefix=account_prefix)
+            yield make_tool_call_chunk(completion_id, model, i, "", arguments=args)
 
         yield make_chunk(completion_id, model, {}, finish_reason="tool_calls")
         yield "data: [DONE]\n\n"
     else:
         clean = strip_tool_calls(text).strip()
         if clean:
-            yield from _yield_text_stream(completion_id, model, clean + account_prefix)
+            yield from _yield_text_stream(completion_id, model, clean + " " + account_prefix)
         else:
-            yield from _yield_text_stream(completion_id, model, text + account_prefix)
+            yield from _yield_text_stream(completion_id, model, text + " " + account_prefix)
 

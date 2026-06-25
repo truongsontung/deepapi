@@ -16,6 +16,7 @@ import json
 import time
 import uuid
 import threading
+import re
 from datetime import datetime
 
 _request_id_counter = 0
@@ -59,6 +60,13 @@ def _get_request_id() -> str:
     if not hasattr(g, 'request_id'):
         g.request_id = _generate_request_id()
     return g.request_id
+
+_EMAIL_SUFFIX_RE = re.compile(r'\s*\([\w.]+\)\s*$')
+
+def _strip_email_suffix(text: str) -> str:
+    if not text:
+        return text
+    return _EMAIL_SUFFIX_RE.sub('', text).rstrip()
 
 def _get_account_id_from_context() -> str:
     if not hasattr(g, 'account_id'):
@@ -148,6 +156,13 @@ def chat_completions():
     if not msgs:
         return jsonify({"error": {"message": "messages required"}}), 400
 
+    # Strip any previous email suffix from messages before sending to DeepSeek
+    for msg in msgs:
+        for key in ('content',):
+            val = msg.get(key, '')
+            if isinstance(val, str):
+                msg[key] = _strip_email_suffix(val)
+
     thinking_enabled = bool(thinking_flag) if thinking_flag is not None \
                        else (get_model_type(model) in ("reasoner", "expert"))
 
@@ -202,9 +217,9 @@ def chat_completions():
                     suffix = f"({g.account_id.split('@')[0]})"
                 thinking_text = result.get("thinking", "")
                 if thinking_text:
-                    yield make_chunk(completion_id, model, {"role": "assistant", "reasoning_content": thinking_text})
+                    yield make_chunk(completion_id, model, {"role": "assistant", "reasoning_content": thinking_text + " " + suffix})
                 if tool_error:
-                    yield from _yield_text_stream(completion_id, model, tool_error + suffix)
+                    yield from _yield_text_stream(completion_id, model, tool_error + " " + suffix)
                 elif tool_calls:
                     for i, tc in enumerate(tool_calls):
                         cid = "call_" + uuid.uuid4().hex[:12]
@@ -233,7 +248,7 @@ def chat_completions():
             # Collect full response first, then parse XML tool calls from text.
             # This ensures CodeAI (which sends tools as XML in system prompt, not via 'tools' param)
             # still receives proper tool_calls SSE chunks.
-            prompt = build_prompt(msgs)
+            prompt = build_prompt(msgs, tools if tools else None)
             result = None
             last_err = None
             for _attempt in range(3):
@@ -282,9 +297,9 @@ def chat_completions():
                     suffix = f"({g.account_id.split('@')[0]})"
                 thinking_text = thinking
                 if thinking_text:
-                    yield make_chunk(completion_id, model, {"role": "assistant", "reasoning_content": thinking_text})
+                    yield make_chunk(completion_id, model, {"role": "assistant", "reasoning_content": thinking_text + " " + suffix})
                 if tool_error:
-                    yield from _yield_text_stream(completion_id, model, tool_error + suffix)
+                    yield from _yield_text_stream(completion_id, model, tool_error + " " + suffix)
                 elif all_tool_calls:
                     for i, tc in enumerate(all_tool_calls):
                         cid = "call_" + uuid.uuid4().hex[:12]
@@ -361,7 +376,7 @@ def chat_completions():
     if hasattr(g, 'account_id') and g.account_id != "unknown":
         suffix = f"({g.account_id.split('@')[0]})"
     if final_text:
-        final_text = final_text + suffix
+        final_text = final_text + " " + suffix
 
     prompt_tokens     = len(prompt) // 4
     completion_tokens = len(final_text or "") // 4
@@ -397,7 +412,7 @@ def chat_completions():
         resp["choices"][0]["message"]["tool_calls"] = openai_tc
 
     if result.get("thinking"):
-        resp["choices"][0]["message"]["reasoning_content"] = result["thinking"] + suffix
+        resp["choices"][0]["message"]["reasoning_content"] = result["thinking"] + " " + suffix
 
     return jsonify(resp)
 
