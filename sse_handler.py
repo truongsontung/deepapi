@@ -22,7 +22,8 @@ def make_chunk(completion_id: str, model: str, delta: dict,
 
 def make_tool_call_chunk(completion_id: str, model: str,
                          index: int, call_id: str,
-                         name: str = None, arguments: str = None) -> str:
+                         name: str = None, arguments: str = None,
+                         account_prefix: str = "") -> str:
     """Create an SSE chunk for a tool call delta."""
     tc_delta = {"index": index}
     if call_id:
@@ -36,7 +37,7 @@ def make_tool_call_chunk(completion_id: str, model: str,
     delta = {"tool_calls": [tc_delta]}
     if call_id:
         delta["role"] = "assistant"
-        delta["content"] = None
+        delta["content"] = account_prefix if account_prefix else None
 
     obj = {
         "id": completion_id,

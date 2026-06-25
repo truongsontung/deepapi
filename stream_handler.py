@@ -2,8 +2,9 @@
 DeepSeek API Server - Stream Handler
 """
 
-from deepseek_client import call_completion, call_continue, parse_sse_lines, collect_response
+from deepseek_client import call_completion, call_continue, parse_sse_lines, collect_response, make_session
 from sse_handler import make_chunk, make_tool_call_chunk
+from token_manager import get_active_token, invalidate_token
 import time
 import json
 
@@ -110,7 +111,7 @@ def stream_generator(token: str, prompt: str, model: str,
             if attempt < MAX_RETRIES:
                 print(f"[retry] Stream attempt {attempt+1} failed ({e}), retrying...")
                 try:
-                    current_token = get_active_token()
+                    current_token, _ = get_active_token()
                 except Exception:
                     pass
                 import time as _time
@@ -121,7 +122,7 @@ def stream_generator(token: str, prompt: str, model: str,
 
 def stream_with_tools(token: str, msgs: list, model: str,
                       thinking_enabled: bool, completion_id: str,
-                      tools: list):
+                      tools: list, account_prefix: str = ""):
     """Stream response with tool call detection.
     Uses background thread to collect response + heartbeat keep-alive to prevent timeout."""
     prompt = build_prompt(msgs, tools)
@@ -154,12 +155,12 @@ def stream_with_tools(token: str, msgs: list, model: str,
 
     if error_container:
         invalidate_token(token)
-        err = {"error": {"type": "api_error", "message": str(error_container[0])}}
+        err = {"error": {"type": "api_error", "message": str(error_container[0]) + account_prefix}}
         yield f"data: {json.dumps(err)}\n\n"
         return
 
     if not result_container:
-        err = {"error": {"type": "api_error", "message": "Request timed out"}}
+        err = {"error": {"type": "api_error", "message": "Request timed out" + account_prefix}}
         yield f"data: {json.dumps(err)}\n\n"
         return
 
@@ -172,23 +173,23 @@ def stream_with_tools(token: str, msgs: list, model: str,
     # Stream reasoning_content if present
     thinking_text = result.get("thinking", "")
     if thinking_text:
-        yield make_chunk(completion_id, model, {"role": "assistant", "reasoning_content": thinking_text})
+        yield make_chunk(completion_id, model, {"role": "assistant", "reasoning_content": thinking_text + account_prefix})
 
     if tool_error:
-        yield from _yield_text_stream(completion_id, model, tool_error)
+        yield from _yield_text_stream(completion_id, model, tool_error + account_prefix)
     elif tool_calls:
         for i, tc in enumerate(tool_calls):
             cid = f"call_{uuid.uuid4().hex[:12]}"
-            yield make_tool_call_chunk(completion_id, model, i, cid, name=tc["name"])
+            yield make_tool_call_chunk(completion_id, model, i, cid, name=tc["name"], account_prefix=account_prefix)
             args = json.dumps(tc["arguments"], ensure_ascii=False)
-            yield make_tool_call_chunk(completion_id, model, i, "", arguments=args)
+            yield make_tool_call_chunk(completion_id, model, i, "", arguments=args, account_prefix=account_prefix)
 
         yield make_chunk(completion_id, model, {}, finish_reason="tool_calls")
         yield "data: [DONE]\n\n"
     else:
         clean = strip_tool_calls(text).strip()
         if clean:
-            yield from _yield_text_stream(completion_id, model, clean)
+            yield from _yield_text_stream(completion_id, model, clean + account_prefix)
         else:
-            yield from _yield_text_stream(completion_id, model, text)
+            yield from _yield_text_stream(completion_id, model, text + account_prefix)
 

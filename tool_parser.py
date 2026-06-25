@@ -6,6 +6,15 @@ import re
 import json
 from config import VALID_TOOLS
 
+KEY_TO_TOOL = {
+    "questions": "AskUserQuestion",
+    "command": "bash",
+    "file_path": "read",
+    "plan": "UpdatePlan",
+    "query": "WebSearch",
+    "old_string": "edit",
+}
+
 def _extract_xml_tags(text: str) -> list:
     """Parse tool call XML from text. Supports:
     1. <tool>name</tool><json>{...}</json>
@@ -947,14 +956,6 @@ def _extract_xml_tags(text: str) -> list:
         r'<tool>\s*<json>(.*?)</json>',
         re.DOTALL  | re.IGNORECASE
     )
-    KEY_TO_TOOL = {
-        "questions": "AskUserQuestion",
-        "command": "bash",
-        "file_path": "read",
-        "plan": "UpdatePlan",
-        "query": "WebSearch",
-        "old_string": "edit",
-    }
     for match in no_name_pattern.finditer(text):
         args_str = match.group(1).strip()
         try:

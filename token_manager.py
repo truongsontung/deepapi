@@ -21,7 +21,7 @@ def prelogin_all_accounts():
                 print(f"[auth] Pre-login tai khoan #{i+1}: {acc.get('email')}")
                 token = login(email=acc.get("email"), password=acc.get("password"))
                 acc["token"] = token
-                print(f"[auth] Pre-login OK #{i+1}: {token[:20]}...")
+                print(f"[auth] Pre-login OK #{i+1} ({acc.get('email')}): {token[:20]}...")
             except Exception as e:
                 print(f"[auth] Pre-login loi #{i+1} ({acc.get('email')}): {e}")
     threading.Thread(target=_login_all, daemon=True).start()
@@ -38,13 +38,14 @@ def _token_refresh_loop():
                 token = login(email=acc.get("email"), password=acc.get("password"))
                 with _account_lock:
                     acc["token"] = token
-                print(f"[auth] Refresh OK #{i+1}: {token[:20]}...")
+                print(f"[auth] Refresh OK #{i+1} ({acc.get('email')}): {token[:20]}...")
             except Exception as e:
                 print(f"[auth] Refresh fail #{i+1} ({acc.get('email')}): {e}")
         print("[auth] Token refresh complete")
 
 
-def get_active_token(force_refresh: bool = False) -> str:
+def get_active_token(force_refresh: bool = False) -> tuple[str, str]:
+    """Returns (token, account_email). Rotates to next account only on force_refresh or failure."""
     global _current_account_index
     with _account_lock:
         if not ACCOUNTS:
@@ -60,17 +61,29 @@ def get_active_token(force_refresh: bool = False) -> str:
                         password=acc.get("password")
                     )
                     acc["token"] = token
-                    print(f"[auth] Login OK #{_current_account_index + 1}: {token[:20]}...")
+                    print(f"[auth] Login OK #{_current_account_index + 1} ({acc.get('email')}): {token[:20]}...")
                 except Exception as e:
                     print(f"[auth] Login fail #{_current_account_index + 1} ({acc.get('email')}): {e}")
                     _current_account_index = (_current_account_index + 1) % len(ACCOUNTS)
                     continue
 
             token = acc["token"]
-            _current_account_index = (_current_account_index + 1) % len(ACCOUNTS)
-            return token
+            email = acc.get("email", "unknown")
+            # Only rotate on force_refresh (explicit request for next account)
+            if force_refresh:
+                _current_account_index = (_current_account_index + 1) % len(ACCOUNTS)
+            return token, email
 
         raise RuntimeError("Tat ca tai khoan DeepSeek deu login that bai!")
+
+
+def get_account_email(token: str) -> str:
+    """Get account email from token"""
+    with _account_lock:
+        for acc in ACCOUNTS:
+            if acc.get("token") == token:
+                return acc.get("email", "unknown")
+    return "unknown"
 
 
 def invalidate_token(token: str = None):
