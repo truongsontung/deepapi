@@ -160,9 +160,46 @@ curl http://localhost:5001/v1/chat/completions \
   }'
 ```
 
-### Cấu hình OpenCode / DeepCode CLI
+### Cấu hình OpenCode
 
-Trong `~/.config/opencode/config.json` hoặc `~/.deepcode/settings.json`:
+OpenCode là CLI agent sử dụng OpenAI‑compatible API. Cấu hình qua file
+`~/.config/opencode/config.json`:
+
+```json
+{
+  "env": {
+    "MODEL": "deepseek-v4-pro",
+    "BASE_URL": "http://localhost:5001/v1",
+    "API_KEY": "deepcode2026"
+  },
+  "thinkingEnabled": true,
+  "reasoningEffort": "max"
+}
+```
+
+| Trường | Giá trị | Giải thích |
+|--------|---------|------------|
+| `MODEL` | `deepseek-v4-pro` hoặc `deepseek-v4-flash` | Model DeepSeek sử dụng |
+| `BASE_URL` | `http://localhost:5001/v1` | URL của DeepAPI server |
+| `API_KEY` | `deepcode2026` | API key (khớp với `API_KEY` trong `.env`) |
+| `thinkingEnabled` | `true` | Bật reasoning content |
+| `reasoningEffort` | `max` | Mức reasoning (max / medium / low) |
+
+#### Kiểm tra kết nối
+
+```bash
+opencode --version
+opencode "Hello, world!"  # Test chat đơn giản
+```
+
+Nếu có lỗi auth, kiểm tra:
+- Server đã chạy chưa? `curl http://localhost:5001/v1/models -H "Authorization: Bearer deepcode2026"`
+- `BASE_URL` có đúng không? Phải kết thúc bằng `/v1`
+- `API_KEY` trong config có khớp với `.env` không?
+
+### Cấu hình DeepCode CLI
+
+Trong `~/.deepcode/settings.json`:
 
 ```json
 {
