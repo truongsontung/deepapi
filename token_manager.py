@@ -95,6 +95,15 @@ def get_account_email(token: str) -> str:
     return "unknown"
 
 
+def get_account_password(email: str) -> str:
+    """Get account password from email"""
+    with _account_lock:
+        for acc in ACCOUNTS:
+            if acc.get("email") == email:
+                return acc.get("password", "")
+    return ""
+
+
 def invalidate_token(token: str = None):
     with _account_lock:
         if token:

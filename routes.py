@@ -4,7 +4,7 @@ DeepSeek API Server - Routes
 
 from flask import Flask, request, Response, jsonify, g
 from config import VALID_API_KEYS, AVAILABLE_MODELS, MODEL_ALIASES, DEBUG_LOG_PATH, DEBUG_LOG_MAX_SIZE, DEBUG_LOG_KEEP, resolve_model
-from token_manager import get_active_token, invalidate_token, get_account_email, rotate_account
+from token_manager import get_active_token, invalidate_token, get_account_email, get_account_password, rotate_account
 from tool_parser import _extract_tool_calls_safe, strip_tool_calls, _validate_tool_calls
 from prompt_builder import build_prompt, _has_xml_tools
 from stream_handler import stream_generator, stream_with_tools
@@ -192,6 +192,7 @@ def chat_completions():
                     result = collect_response(
                         token=token, session_id=session_id, prompt=prompt,
                         model=model, thinking=thinking_enabled, http_session=sess,
+                        account_email=email, account_password=get_account_password(email),
                     )
                     break
                 except Exception as e:
@@ -260,6 +261,7 @@ def chat_completions():
                     result = collect_response(
                         token=token, session_id=session_id, prompt=prompt,
                         model=model, thinking=thinking_enabled, http_session=sess,
+                        account_email=email, account_password=get_account_password(email),
                     )
                     break
                 except Exception as e:
@@ -348,6 +350,7 @@ def chat_completions():
             result = collect_response(
                 token=token, session_id=session_id, prompt=prompt,
                 model=model, thinking=thinking_enabled, http_session=sess,
+                account_email=email, account_password=get_account_password(email),
             )
             break  # Success
         except Exception as e:

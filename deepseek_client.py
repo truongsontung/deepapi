@@ -250,14 +250,20 @@ class PlaywrightWorker(threading.Thread):
         )
 
         stream_done = False
+        poll_start = time.time()
+        POLL_TIMEOUT = 300  # 5 minutes max for SSE stream
+
         while not stream_done:
+            if time.time() - poll_start > POLL_TIMEOUT:
+                resp_queue.put(("error", TimeoutError("SSE stream poll timed out (300s)")))
+                break
+
             self.page.wait_for_timeout(100)
             result = self.page.evaluate("""() => {
                 const chunks = window._sse_chunks || [];
                 window._sse_chunks = [];
                 return { chunks: chunks, done: window._sse_done || false };
             }""")
-            # print(f"[worker] Poll result: {result}")
             
             for chunk in result["chunks"]:
                 if chunk.startswith("error: "):
@@ -995,7 +1001,9 @@ def collect_response(token: str, session_id: str, prompt: str,
                      thinking: bool = False,
                      search: bool = False,
                      http_session: BrowserSession = None,
-                     max_continue_rounds: int = 8) -> dict:
+                     max_continue_rounds: int = 8,
+                     account_email: str = None,
+                     account_password: str = None) -> dict:
 
     if http_session is None:
         http_session = get_default_session()
@@ -1054,9 +1062,22 @@ def collect_response(token: str, session_id: str, prompt: str,
         if msg_id <= 0:
             break
         print(f"[auto_continue] round {rnd+1}, msg_id={msg_id}")
-        pow_resp2 = get_pow(token, session=http_session)
-        cont = call_continue(token, session_id, msg_id,
-                             pow_response=pow_resp2, http_session=http_session)
+
+        # Refresh token if credentials available (may expire during long thinking)
+        current_token = token
+        if account_email and account_password:
+            try:
+                current_token = login(
+                    email=account_email, password=account_password,
+                    session=http_session
+                )
+                print(f"[auto_continue] token refreshed for {account_email}")
+            except Exception as e:
+                print(f"[auto_continue] token refresh failed: {e}")
+
+        # Reuse cached PoW (saves ~3-10s per round instead of re-solving)
+        cont = call_continue(current_token, session_id, msg_id,
+                             pow_response=pow_resp, http_session=http_session)
         last_status = ""
         process(_tee(cont))
 
