@@ -162,40 +162,70 @@ curl http://localhost:5001/v1/chat/completions \
 
 ### Cấu hình OpenCode
 
-OpenCode là CLI agent sử dụng OpenAI‑compatible API. Cấu hình qua file
-`~/.config/opencode/config.json`:
+OpenCode CLI sử dụng file `~/.config/opencode/opencode.json`:
 
 ```json
 {
-  "env": {
-    "MODEL": "deepseek-v4-pro",
-    "BASE_URL": "http://localhost:5001/v1",
-    "API_KEY": "deepcode2026"
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "deepapi": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "DeepAPI",
+      "options": {
+        "baseURL": "http://127.0.0.1:5001/v1",
+        "apiKey": "deepcode2026"
+      },
+      "models": {
+        "deepseek-chat": {
+          "name": "DeepAPI Chat"
+        },
+        "deepseek-v4-flash": {
+          "name": "DeepAPI V4 Flash",
+          "options": {
+            "thinking": { "type": "enabled" },
+            "reasoning": { "effort": "medium" }
+          }
+        },
+        "deepseek-v4-pro": {
+          "name": "DeepAPI V4 Pro",
+          "options": {
+            "thinking": { "type": "enabled" },
+            "reasoning": { "effort": "high" }
+          }
+        }
+      }
+    }
   },
-  "thinkingEnabled": true,
-  "reasoningEffort": "max"
+  "model": "deepapi/deepseek-v4-flash"
 }
 ```
 
 | Trường | Giá trị | Giải thích |
 |--------|---------|------------|
-| `MODEL` | `deepseek-v4-pro` hoặc `deepseek-v4-flash` | Model DeepSeek sử dụng |
-| `BASE_URL` | `http://localhost:5001/v1` | URL của DeepAPI server |
-| `API_KEY` | `deepcode2026` | API key (khớp với `API_KEY` trong `.env`) |
-| `thinkingEnabled` | `true` | Bật reasoning content |
-| `reasoningEffort` | `max` | Mức reasoning (max / medium / low) |
+| `provider.<name>.npm` | `@ai-sdk/openai-compatible` | Provider package cho OpenAI‑compatible API |
+| `provider.<name>.options.baseURL` | `http://127.0.0.1:5001/v1` | URL của DeepAPI server |
+| `provider.<name>.options.apiKey` | `deepcode2026` | API key (khớp với `API_KEY` trong `.env`) |
+| `model` | `deepapi/<model_name>` | Model mặc định, format: `provider_id/model_id` |
+| `thinking.type` | `"enabled"` | Bật reasoning content |
+| `reasoning.effort` | `"high"`, `"medium"`, `"low"` | Mức reasoning effort |
+
+#### Chọn model mặc định
+
+Đổi `model` để chọn model khởi động:
+- `"deepapi/deepseek-v4-flash"` — nhanh, phù hợp task đơn giản
+- `"deepapi/deepseek-v4-pro"` — mạnh, phù hợp task phức tạp
+- `"deepapi/deepseek-chat"` — không thinking (chat thuần)
 
 #### Kiểm tra kết nối
 
 ```bash
-opencode --version
-opencode "Hello, world!"  # Test chat đơn giản
+opencode "Hello, world!"
 ```
 
 Nếu có lỗi auth, kiểm tra:
-- Server đã chạy chưa? `curl http://localhost:5001/v1/models -H "Authorization: Bearer deepcode2026"`
-- `BASE_URL` có đúng không? Phải kết thúc bằng `/v1`
-- `API_KEY` trong config có khớp với `.env` không?
+- Server đã chạy chưa? `curl http://127.0.0.1:5001/v1/models -H "Authorization: Bearer deepcode2026"`
+- `baseURL` có đúng không? Phải kết thúc bằng `/v1`
+- `apiKey` trong config có khớp với `API_KEY` trong `.env` không?
 
 ### Cấu hình DeepCode CLI
 
