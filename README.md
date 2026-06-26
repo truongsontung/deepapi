@@ -14,9 +14,13 @@ DeepAPI là REST API bridge tương thích OpenAI, cho phép gọi DeepSeek Chat
 giao diện chuẩn `/v1/chat/completions`. Hỗ trợ **tool calling** (function calling)
 qua XML parsing, streaming, multi-account, và tự động xoay vòng tài khoản.
 
-Dự án được phát triển dựa trên:
+Nguồn tham khảo:
+- [lessweb/deepcode-cli](https://github.com/lessweb/deepcode-cli.git)
+- [taitestgame/deepapi](https://github.com/taitestgame/deepapi.git)
+
+Ứng dụng cho:
 - [deepcode-cli](https://github.com/lessweb/deepcode-cli.git) — CLI client cho DeepSeek
-- [deepapi](https://github.com/taitestgame/deepapi.git) — API bridge gốc
+- [opencode](https://opencode.ai) — CLI agent mã nguồn mở
 
 ## Tính năng
 
@@ -347,5 +351,6 @@ Dự án này chỉ dành cho **mục đích nghiên cứu và học tập**.
 
 ## Credits
 
-- [deepcode-cli](https://github.com/lessweb/deepcode-cli.git) — CLI client cho DeepSeek
-- [deepapi](https://github.com/taitestgame/deepapi.git) — API bridge gốc
+- [lessweb/deepcode-cli](https://github.com/lessweb/deepcode-cli.git) — nguồn tham khảo
+- [taitestgame/deepapi](https://github.com/taitestgame/deepapi.git) — nguồn tham khảo
+- [opencode](https://opencode.ai) — ứng dụng CLI agent
