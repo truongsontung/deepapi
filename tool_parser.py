@@ -15,7 +15,7 @@ KEY_TO_TOOL = {
     "old_string": "edit",
 }
 
-def _extract_xml_tags(text: str) -> list:
+def _extract_xml_tags(text: str) -> list:  # modified again
     """Parse tool call XML from text. Supports:
     1. <tool>name</tool><json>{...}</json>
     2. <function_call name="X"><args>JSON</args></function_call> (legacy)
@@ -44,8 +44,85 @@ def _extract_xml_tags(text: str) -> list:
     for fake in ('name', 'NAME', 'X', 'N', 'tool_name', 'TÊN', 'TEN', 'tên_tool'):
         text = re.sub(rf'`<[^>]*{fake}[^>]*>`', '', text)
     tools = []
+    # Format 1: <tool>name</tool><json>{...}</json>
+    # Ưu tiên cao nhất — đây là format chuẩn, tránh false positive từ Format 26
+    # khi text chứa <tools> trong string (ví dụ Python code trong command)
+    # Dùng iterative matching thay vì non-greedy (.*?) để xử lý đúng khi
+    # command string chứa literal </json> (không bắt nhầm tag đóng giả)
+    # Dùng search() + manual position advance để tránh finditer() bắt nhầm
+    # <tool>name</tool><json> lồng bên trong JSON string
+    tool_pattern = re.compile(
+        r'<tool>\s*(\w+)\s*</tool>\s*<json>',
+        re.DOTALL  | re.IGNORECASE
+    )
+    search_from = 0
+    while True:
+        match = tool_pattern.search(text, search_from)
+        if not match:
+            break
+        tool_name = match.group(1)
+        rest = text[match.end():]
+        pos = 0
+        found = False
+        while True:
+            close_pos = rest.find('</json>', pos)
+            if close_pos == -1:
+                break
+            args_str = rest[:close_pos].strip()
+            try:
+                args = json.loads(args_str)
+                tools.append({"name": tool_name, "arguments": args})
+                search_from = match.end() + close_pos + 7
+                found = True
+                break
+            except json.JSONDecodeError:
+                pos = close_pos + 7
+                continue
+        if not found:
+            search_from = match.end()
+    if tools:
+        return tools
+
+
+    # Format 1c: <tool>name</tool><json>{...}</tool> (missing </json>)
+    # Tương tự Format 1, dùng iterative matching
+    tool_pattern_no_json_close = re.compile(
+        r'<tool>\s*(\w+)\s*</tool>\s*<json>',
+        re.DOTALL | re.IGNORECASE
+    )
+    search_from = 0
+    while True:
+        match = tool_pattern_no_json_close.search(text, search_from)
+        if not match:
+            break
+        tool_name = match.group(1)
+        rest = text[match.end():]
+        pos = 0
+        found = False
+        while True:
+            close_pos = rest.find('</tool>', pos)
+            if close_pos == -1:
+                break
+            args_str = rest[:close_pos].strip()
+            try:
+                args = json.loads(args_str)
+                tools.append({"name": tool_name, "arguments": args})
+                search_from = match.end() + close_pos + 7
+                found = True
+                break
+            except json.JSONDecodeError:
+                pos = close_pos + 7
+                continue
+        if not found:
+            search_from = match.end()
+
+    if tools:
+        return tools
+
+
     # Format 26: <tools><tool>...</tool><tool>...</tool></tools>
-    # (multi-tool wrapper, Var 30) — MUST come first (container)
+    # (multi-tool wrapper) — Đặt SAU Format 1 để tránh false positive khi
+    # text chứa <tools>...</tools> trong string (vd: Python code trong command)
     tools_wrapper = re.compile(
         r'<tools>(.*?)</tools>',
         re.DOTALL  | re.IGNORECASE
@@ -58,62 +135,31 @@ def _extract_xml_tags(text: str) -> list:
         return tools
 
 
-    # Format 1: <tool>name</tool><json>{...}</json>
-    tool_pattern = re.compile(
-        r'<tool>\s*(\w+)\s*</tool>\s*<json>(.*?)</json>',
-        re.DOTALL  | re.IGNORECASE
-    )
-    for match in tool_pattern.finditer(text):
-        tool_name = match.group(1)
-        args_str = match.group(2).strip()
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = {}
-        tools.append({"name": tool_name, "arguments": args})
-    if tools:
-        return tools
-
-
-     # Format 1c: <tool>name</tool><json>{...}</tool> (missing </json>)    
-    tool_pattern_no_json_close = re.compile(
-        r'<tool>\s*(\w+)\s*</tool>\s*<json>(.*?)</tool>',
+    # Format 2 (legacy): <function_call name="X"><args>JSON</args></function_call>
+    # Dùng iterative matching để tránh truncation khi args chứa literal </args>
+    fc_pattern = re.compile(
+        r'<function_call\s+name\s*=\s*"(\w+)"\s*>\s*<args>',
         re.DOTALL | re.IGNORECASE
     )
-
-    for match in tool_pattern_no_json_close.finditer(text):
-        tool_name = match.group(1)
-        args_str = match.group(2).strip()
-
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = {}
-
-        tools.append({
-            "name": tool_name,
-            "arguments": args
-        })
-
-    if tools:
-        return tools
-
-
-    # Format 2 (legacy): <function_call name="X"><args>JSON</args></function_call>
-    fc_pattern = re.compile(
-        r'<function_call\s+name\s*=\s*"(\w+)"\s*>\s*'
-        r'<args>(.*?)</args>\s*'
-        r'</function_call>',
-        re.DOTALL  | re.IGNORECASE
-    )
+    fc_close_re = re.compile(r'</args>\s*</function_call>', re.DOTALL)
     for match in fc_pattern.finditer(text):
         tool_name = match.group(1)
-        args_str = match.group(2).strip()
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = {}
-        tools.append({"name": tool_name, "arguments": args})
+        rest = text[match.end():]
+        pos = 0
+        while True:
+            cm = fc_close_re.search(rest[pos:])
+            if not cm:
+                break
+            abs_end = pos + cm.end()
+            abs_start = pos + cm.start()
+            args_str = rest[:abs_start].strip()
+            try:
+                args = json.loads(args_str)
+                tools.append({"name": tool_name, "arguments": args})
+                break
+            except json.JSONDecodeError:
+                pos = abs_end
+                continue
     if tools:
         return tools
 
@@ -121,17 +167,25 @@ def _extract_xml_tags(text: str) -> list:
     # Format 2b: <function_call name="X"><args>JSON</args> (missing </function_call>)
     # Fallback when DeepSeek forgets the closing function_call tag
     fc_no_close_pattern = re.compile(
-        r'<function_call\s+name\s*=\s*"(\w+)"\s*>\s*<args>(.*?)</args>',
+        r'<function_call\s+name\s*=\s*"(\w+)"\s*>\s*<args>',
         re.DOTALL  | re.IGNORECASE
     )
     for match in fc_no_close_pattern.finditer(text):
         tool_name = match.group(1)
-        args_str = match.group(2).strip()
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = {}
-        tools.append({"name": tool_name, "arguments": args})
+        rest = text[match.end():]
+        pos = 0
+        while True:
+            close_pos = rest.find('</args>', pos)
+            if close_pos == -1:
+                break
+            args_str = rest[:close_pos].strip()
+            try:
+                args = json.loads(args_str)
+                tools.append({"name": tool_name, "arguments": args})
+                break
+            except json.JSONDecodeError:
+                pos = close_pos + 7
+                continue
 
 
     # Format 3: <tool><name>X</name><parameter ...>value</parameter>...</tool>
@@ -169,16 +223,27 @@ def _extract_xml_tags(text: str) -> list:
     tool_names = sorted(VALID_TOOLS)  # sync với VALID_TOOLS
     for tname in tool_names:
         json_inner_pattern = re.compile(
-            rf'<tool>\s*<{tname}>\s*<json>(.*?)</json>\s*</{tname}>\s*</tool>',
+            rf'<tool>\s*<{tname}>\s*<json>',
             IGN
         )
+        json_inner_close = re.compile(rf'</json>\s*</{re.escape(tname)}>\s*</tool>', IGN)
         for match in json_inner_pattern.finditer(text):
-            args_str = match.group(1).strip()
-            try:
-                args = json.loads(args_str)
-            except (json.JSONDecodeError, ValueError):
-                args = {}
-            tools.append({"name": tname.lower(), "arguments": args})
+            rest = text[match.end():]
+            pos = 0
+            while True:
+                cm = json_inner_close.search(rest[pos:])
+                if not cm:
+                    break
+                abs_end = pos + cm.end()
+                abs_start = pos + cm.start()
+                args_str = rest[:abs_start].strip()
+                try:
+                    args = json.loads(args_str)
+                except (json.JSONDecodeError, ValueError):
+                    pos = abs_end
+                    continue
+                tools.append({"name": tname.lower(), "arguments": args})
+                break
     if tools:
         return tools
 
@@ -187,16 +252,27 @@ def _extract_xml_tags(text: str) -> list:
     # Variant of Format 6: <tool><read><json>{\"file_path\":\"...\"}</json></tool>
     for tname in tool_names:
         no_close_name_pattern = re.compile(
-            rf'<tool>\s*<{tname}>\s*<json>(.*?)</json>\s*</tool>',
+            rf'<tool>\s*<{tname}>\s*<json>',
             IGN
         )
+        no_close_name_close = re.compile(r'</json>\s*</tool>', IGN)
         for match in no_close_name_pattern.finditer(text):
-            args_str = match.group(1).strip()
-            try:
-                args = json.loads(args_str)
-            except (json.JSONDecodeError, ValueError):
-                args = {}
-            tools.append({"name": tname.lower(), "arguments": args})
+            rest = text[match.end():]
+            pos = 0
+            while True:
+                cm = no_close_name_close.search(rest[pos:])
+                if not cm:
+                    break
+                abs_end = pos + cm.end()
+                abs_start = pos + cm.start()
+                args_str = rest[:abs_start].strip()
+                try:
+                    args = json.loads(args_str)
+                except (json.JSONDecodeError, ValueError):
+                    pos = abs_end
+                    continue
+                tools.append({"name": tname.lower(), "arguments": args})
+                break
     if tools:
         return tools
 
@@ -299,17 +375,28 @@ def _extract_xml_tags(text: str) -> list:
 
     # Format 10: <tool><tool_call>NAME</tool_call><json>{...}</json></tool>
     tool_call_tag_pattern = re.compile(
-        r'<tool>\s*<tool_call>(\w+)</tool_call>\s*<json>(.*?)</json>\s*</tool>',
-        re.DOTALL  | re.IGNORECASE
+        r'<tool>\s*<tool_call>(\w+)</tool_call>\s*<json>',
+        re.DOTALL | re.IGNORECASE
     )
+    ft10_close = re.compile(r'</json>\s*</tool>', re.DOTALL | re.IGNORECASE)
     for match in tool_call_tag_pattern.finditer(text):
         tool_name = match.group(1)
-        args_str = match.group(2).strip()
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = {}
-        tools.append({"name": tool_name, "arguments": args})
+        rest = text[match.end():]
+        pos = 0
+        while True:
+            cm = ft10_close.search(rest[pos:])
+            if not cm:
+                break
+            abs_end = pos + cm.end()
+            abs_start = pos + cm.start()
+            args_str = rest[:abs_start].strip()
+            try:
+                args = json.loads(args_str)
+                tools.append({"name": tool_name, "arguments": args})
+                break
+            except json.JSONDecodeError:
+                pos = abs_end
+                continue
     if tools:
         return tools
 
@@ -461,17 +548,28 @@ def _extract_xml_tags(text: str) -> list:
     #     <json>{"command":"...","description":"...","sideEffects":[...]}</json>
     #   </tool>
     tool_name_tag_json_pattern = re.compile(
-        r'<tool>\s*<tool_name\s+name\s*=\s*"(\w+)"[^>]*>\s*\1\s*</tool_name>\s*<json>(.*?)</json>\s*</tool>',
-        re.DOTALL  | re.IGNORECASE
+        r'<tool>\s*<tool_name\s+name\s*=\s*"(\w+)"[^>]*>\s*\1\s*</tool_name>\s*<json>',
+        re.DOTALL | re.IGNORECASE
     )
+    ft13_close = re.compile(r'</json>\s*</tool>', re.DOTALL | re.IGNORECASE)
     for match in tool_name_tag_json_pattern.finditer(text):
         tool_name = match.group(1)
-        args_str = match.group(2).strip()
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = {}
-        tools.append({"name": tool_name, "arguments": args})
+        rest = text[match.end():]
+        pos = 0
+        while True:
+            cm = ft13_close.search(rest[pos:])
+            if not cm:
+                break
+            abs_end = pos + cm.end()
+            abs_start = pos + cm.start()
+            args_str = rest[:abs_start].strip()
+            try:
+                args = json.loads(args_str)
+                tools.append({"name": tool_name, "arguments": args})
+                break
+            except json.JSONDecodeError:
+                pos = abs_end
+                continue
     if tools:
         return tools
 
@@ -479,17 +577,25 @@ def _extract_xml_tags(text: str) -> list:
     # Format 13b: <tool><tool_name name="X">X</tool_name><json>{...}</json> (missing </tool>)
     # Loose closing: </tool> may be omitted
     tool_name_tag_json_no_close_pattern = re.compile(
-        r'<tool>\s*<tool_name\s+name\s*=\s*"(\w+)"[^>]*>\s*\1\s*</tool_name>\s*<json>(.*?)</json>',
-        re.DOTALL  | re.IGNORECASE
+        r'<tool>\s*<tool_name\s+name\s*=\s*"(\w+)"[^>]*>\s*\1\s*</tool_name>\s*<json>',
+        re.DOTALL | re.IGNORECASE
     )
     for match in tool_name_tag_json_no_close_pattern.finditer(text):
         tool_name = match.group(1)
-        args_str = match.group(2).strip()
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = {}
-        tools.append({"name": tool_name, "arguments": args})
+        rest = text[match.end():]
+        pos = 0
+        while True:
+            close_pos = rest.find('</json>', pos)
+            if close_pos == -1:
+                break
+            args_str = rest[:close_pos].strip()
+            try:
+                args = json.loads(args_str)
+                tools.append({"name": tool_name, "arguments": args})
+                break
+            except json.JSONDecodeError:
+                pos = close_pos + 7
+                continue
     if tools:
         return tools
 
@@ -554,34 +660,53 @@ def _extract_xml_tags(text: str) -> list:
     # Format 15: <tool><tool_name>NAME</tool_name><json>{...}</json></tool>
     # (simple tool_name without name attribute, different from Format 13)
     tool_name_json_pattern = re.compile(
-        r'<tool>\s*<tool_name>(\w+)</tool_name>\s*<json>(.*?)</json>\s*</tool>',
-        re.DOTALL  | re.IGNORECASE
+        r'<tool>\s*<tool_name>(\w+)</tool_name>\s*<json>',
+        re.DOTALL | re.IGNORECASE
     )
+    ft15_close = re.compile(r'</json>\s*</tool>', re.DOTALL | re.IGNORECASE)
     for match in tool_name_json_pattern.finditer(text):
         tool_name = match.group(1)
-        args_str = match.group(2).strip()
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = {}
-        tools.append({"name": tool_name, "arguments": args})
+        rest = text[match.end():]
+        pos = 0
+        while True:
+            cm = ft15_close.search(rest[pos:])
+            if not cm:
+                break
+            abs_end = pos + cm.end()
+            abs_start = pos + cm.start()
+            args_str = rest[:abs_start].strip()
+            try:
+                args = json.loads(args_str)
+                tools.append({"name": tool_name, "arguments": args})
+                break
+            except json.JSONDecodeError:
+                pos = abs_end
+                continue
     if tools:
         return tools
 
 
     # Format 15b: <tool><tool_name>NAME</tool_name><json>{...}</json> (missing </tool>)
     tool_name_json_no_close_pattern = re.compile(
-        r'<tool>\s*<tool_name>(\w+)</tool_name>\s*<json>(.*?)</json>',
-        re.DOTALL  | re.IGNORECASE
+        r'<tool>\s*<tool_name>(\w+)</tool_name>\s*<json>',
+        re.DOTALL | re.IGNORECASE
     )
     for match in tool_name_json_no_close_pattern.finditer(text):
         tool_name = match.group(1)
-        args_str = match.group(2).strip()
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = {}
-        tools.append({"name": tool_name, "arguments": args})
+        rest = text[match.end():]
+        pos = 0
+        while True:
+            close_pos = rest.find('</json>', pos)
+            if close_pos == -1:
+                break
+            args_str = rest[:close_pos].strip()
+            try:
+                args = json.loads(args_str)
+                tools.append({"name": tool_name, "arguments": args})
+                break
+            except json.JSONDecodeError:
+                pos = close_pos + 7
+                continue
     if tools:
         return tools
 
@@ -749,34 +874,53 @@ def _extract_xml_tags(text: str) -> list:
     # Format 19: <tool tool_name="X"><json>{...}</json></tool>
     # (tool_name as attribute + json child, Var 17)
     tool_attr_json_pattern = re.compile(
-        r'<tool\s+tool_name\s*=\s*"(\w+)"\s*>\s*<json>(.*?)</json>\s*</tool>',
-        re.DOTALL  | re.IGNORECASE
+        r'<tool\s+tool_name\s*=\s*"(\w+)"\s*>\s*<json>',
+        re.DOTALL | re.IGNORECASE
     )
+    ft19_close = re.compile(r'</json>\s*</tool>', re.DOTALL | re.IGNORECASE)
     for match in tool_attr_json_pattern.finditer(text):
         tool_name = match.group(1)
-        args_str = match.group(2).strip()
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = {}
-        tools.append({"name": tool_name, "arguments": args})
+        rest = text[match.end():]
+        pos = 0
+        while True:
+            cm = ft19_close.search(rest[pos:])
+            if not cm:
+                break
+            abs_end = pos + cm.end()
+            abs_start = pos + cm.start()
+            args_str = rest[:abs_start].strip()
+            try:
+                args = json.loads(args_str)
+                tools.append({"name": tool_name, "arguments": args})
+                break
+            except json.JSONDecodeError:
+                pos = abs_end
+                continue
     if tools:
         return tools
 
 
     # Format 19b: <tool tool_name="X"><json>{...}</json> (missing </tool>)
     tool_attr_json_no_close = re.compile(
-        r'<tool\s+tool_name\s*=\s*"(\w+)"\s*>\s*<json>(.*?)</json>',
-        re.DOTALL  | re.IGNORECASE
+        r'<tool\s+tool_name\s*=\s*"(\w+)"\s*>\s*<json>',
+        re.DOTALL | re.IGNORECASE
     )
     for match in tool_attr_json_no_close.finditer(text):
         tool_name = match.group(1)
-        args_str = match.group(2).strip()
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = {}
-        tools.append({"name": tool_name, "arguments": args})
+        rest = text[match.end():]
+        pos = 0
+        while True:
+            close_pos = rest.find('</json>', pos)
+            if close_pos == -1:
+                break
+            args_str = rest[:close_pos].strip()
+            try:
+                args = json.loads(args_str)
+                tools.append({"name": tool_name, "arguments": args})
+                break
+            except json.JSONDecodeError:
+                pos = close_pos + 7
+                continue
     if tools:
         return tools
 
@@ -784,34 +928,53 @@ def _extract_xml_tags(text: str) -> list:
     # Format 20: <tool><tool_name>X</tool_name><input>{JSON}</input></tool>
     # (<input> instead of <json>, Var 22) — before Format 17
     tool_input_pattern = re.compile(
-        r'<tool>\s*<tool_name>(\w+)</tool_name>\s*<input>(.*?)</input>\s*</tool>',
-        re.DOTALL  | re.IGNORECASE
+        r'<tool>\s*<tool_name>(\w+)</tool_name>\s*<input>',
+        re.DOTALL | re.IGNORECASE
     )
+    ft20_close = re.compile(r'</input>\s*</tool>', re.DOTALL | re.IGNORECASE)
     for match in tool_input_pattern.finditer(text):
         tool_name = match.group(1)
-        args_str = match.group(2).strip()
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = {}
-        tools.append({"name": tool_name, "arguments": args})
+        rest = text[match.end():]
+        pos = 0
+        while True:
+            cm = ft20_close.search(rest[pos:])
+            if not cm:
+                break
+            abs_end = pos + cm.end()
+            abs_start = pos + cm.start()
+            args_str = rest[:abs_start].strip()
+            try:
+                args = json.loads(args_str)
+                tools.append({"name": tool_name, "arguments": args})
+                break
+            except json.JSONDecodeError:
+                pos = abs_end
+                continue
     if tools:
         return tools
 
 
     # Format 20b: <tool><tool_name>X</tool_name><input>{JSON}</input> (missing </tool>)
     tool_input_no_close = re.compile(
-        r'<tool>\s*<tool_name>(\w+)</tool_name>\s*<input>(.*?)</input>',
-        re.DOTALL  | re.IGNORECASE
+        r'<tool>\s*<tool_name>(\w+)</tool_name>\s*<input>',
+        re.DOTALL | re.IGNORECASE
     )
     for match in tool_input_no_close.finditer(text):
         tool_name = match.group(1)
-        args_str = match.group(2).strip()
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = {}
-        tools.append({"name": tool_name, "arguments": args})
+        rest = text[match.end():]
+        pos = 0
+        while True:
+            close_pos = rest.find('</input>', pos)
+            if close_pos == -1:
+                break
+            args_str = rest[:close_pos].strip()
+            try:
+                args = json.loads(args_str)
+                tools.append({"name": tool_name, "arguments": args})
+                break
+            except json.JSONDecodeError:
+                pos = close_pos + 8
+                continue
     if tools:
         return tools
 
@@ -952,22 +1115,40 @@ def _extract_xml_tags(text: str) -> list:
 
     # Format 1b: <tool>\n<json>{...}</json> (no tool name, possibly no closing </tool>)
     # Infer tool name from JSON keys
+    # Dùng search() + manual advance để tránh bắt nhầm <tool><json> lồng nhau
     no_name_pattern = re.compile(
-        r'<tool>\s*<json>(.*?)</json>',
+        r'<tool>\s*<json>',
         re.DOTALL  | re.IGNORECASE
     )
-    for match in no_name_pattern.finditer(text):
-        args_str = match.group(1).strip()
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = {}
-        tool_name = "unknown"
-        for key, tname in KEY_TO_TOOL.items():
-            if key in args:
-                tool_name = tname
+    search_from = 0
+    while True:
+        match = no_name_pattern.search(text, search_from)
+        if not match:
+            break
+        rest = text[match.end():]
+        pos = 0
+        found = False
+        while True:
+            close_pos = rest.find('</json>', pos)
+            if close_pos == -1:
                 break
-        tools.append({"name": tool_name, "arguments": args})
+            args_str = rest[:close_pos].strip()
+            try:
+                args = json.loads(args_str)
+            except json.JSONDecodeError:
+                pos = close_pos + 7
+                continue
+            tool_name = "unknown"
+            for key, tname in KEY_TO_TOOL.items():
+                if key in args:
+                    tool_name = tname
+                    break
+            tools.append({"name": tool_name, "arguments": args})
+            search_from = match.end() + close_pos + 7
+            found = True
+            break
+        if not found:
+            search_from = match.end()
     if tools:
         return tools
 
@@ -1128,118 +1309,85 @@ def _extract_tool_calls_safe(text: str) -> list:
     return tool_calls
 
 def strip_tool_calls(text: str) -> str:
-    """Remove tool call XML blocks from text."""
+    """Remove tool call XML blocks from text.
+    Code blocks (```...```) được bảo vệ để không bị cắt — chúng là ví dụ,
+    không phải tool call thật.
+    """
+    # Bảo vệ code blocks: giữ lại nguyên vẹn, không strip bên trong
+    code_blocks = []
+    def _save_cb(m):
+        code_blocks.append(m.group(0))
+        return f'\x00CB{len(code_blocks)-1}\x00'
+    text = re.sub(r'```.*?```', _save_cb, text, flags=re.DOTALL)
+
     text = re.sub(r'<tool>\s*\w+\s*</tool>\s*<json>.*?</json>', '', text, flags=re.DOTALL)
     text = re.sub(r'<function_call\s+name\s*=\s*"[^"]*"\s*>.*?</function_call>', '', text, flags=re.DOTALL)
     text = re.sub(r'<function_call\s+name\s*=\s*"[^"]*"\s*>\s*<args>.*?</args>', '', text, flags=re.DOTALL)
     text = re.sub(r'<tool>\s*<name>\w+</name>.*?</tool>', '', text, flags=re.DOTALL)
     text = re.sub(r'<tool>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
-    # Format 9: <tool><parameter name="KEY">value</parameter>...</tool>
     text = re.sub(r'<tool>\s*(<parameter\s+name\s*=\s*"\w+"[^>]*>\s*.*?\s*</parameter>\s*)+</tool>', '', text, flags=re.DOTALL)
-    # Format 10: <tool><tool_call>NAME</tool_call><json>{...}</json></tool>
     text = re.sub(r'<tool>\s*<tool_call>\w+</tool_call>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
-    # Format 11: <tool><tool>NAME</tool><parameter>k</parameter><parameter>v</parameter>...</tool>
     text = re.sub(r'<tool>\s*<tool>\w+</tool>\s*(<parameter>[^<]*</parameter>\s*)+</tool>', '', text, flags=re.DOTALL)
-    # Format 11b: <tool><tool>NAME</tool><parameter>k</parameter><parameter>v</parameter>... (missing </tool>)
     text = re.sub(r'<tool>\s*<tool>\w+</tool>\s*(<parameter>[^<]*</parameter>\s*)+', '', text, flags=re.DOTALL)
-    # Format 8: <tool name="TOOL"><parameter ...>...</parameter></tool>
     text = re.sub(r'<tool\s+name\s*=\s*"[^"]*"\s*>.*?</tool>', '', text, flags=re.DOTALL)
-    # Format 10b: <tool><tool_call name="NAME"><parameter ...>...</parameter></tool_call></tool>
     text = re.sub(r'<tool>\s*<tool_call\s+name\s*=\s*"\w+"\s*>.*?</tool_call>\s*</tool>', '', text, flags=re.DOTALL)
-    # Format 10c: <tool><tool_call>NAME</tool_call><parameter name="KEY">value</parameter>...</tool>
     text = re.sub(r'<tool>\s*<tool_call>\w+</tool_call>\s*(<parameter\s+name\s*=\s*"\w+"[^>]*>\s*.*?\s*</parameter>\s*)+</tool>', '', text, flags=re.DOTALL)
-    # Format 12: <tool>{JSON}</tool> (raw JSON)
     text = re.sub(r'<tool>\s*\{[^}]*\}\s*</tool>', '', text, flags=re.DOTALL)
     text = re.sub(r'<tool>\s*\{.*?\}\s*</tool>', '', text, flags=re.DOTALL)
-    # Format 13: <tool><tool_name name="X">X</tool_name><json>{...}</json></tool>
     text = re.sub(r'<tool>\s*<tool_name\s+name\s*=\s*"[^"]*"[^>]*>\s*\w+\s*</tool_name>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
     text = re.sub(r'<tool>\s*<tool_name\s+name\s*=\s*"[^"]*"[^>]*>\s*\w+\s*</tool_name>\s*<json>.*?</json>', '', text, flags=re.DOTALL)
-    # Format 16: <tool><invoke name="X"><parameter ...>...</parameter></invoke></tool>
-    # (trip: MUST strip before Format 14 to avoid partial stripping)
     text = re.sub(r'<tool>\s*<invoke\s+name\s*=\s*"\w+"\s*>(?:\s*<parameter\s+name\s*=\s*"\w+"[^>]*>\s*.*?\s*</parameter>\s*)+</invoke>\s*</tool>', '', text, flags=re.DOTALL)
-    # Format 16b: <tool><invoke name="X"><parameter ...>...</parameter></invoke> (missing </tool>)
     text = re.sub(r'<tool>\s*<invoke\s+name\s*=\s*"\w+"\s*>(?:\s*<parameter\s+name\s*=\s*"\w+"[^>]*>\s*.*?\s*</parameter>\s*)+</invoke>', '', text, flags=re.DOTALL)
-    # Format 14: <invoke name="X"><parameter ...>...</parameter></invoke>
     text = re.sub(r'<invoke\s+name\s*=\s*"\w+"\s*>(?:\s*<parameter\s+name\s*=\s*"\w+"[^>]*>\s*.*?\s*</parameter>\s*)+</invoke>', '', text, flags=re.DOTALL)
-    # Format 14b: <invoke name="X"><parameter ...>...</parameter> (missing </invoke>)
     text = re.sub(r'<invoke\s+name\s*=\s*"\w+"\s*>(?:\s*<parameter\s+name\s*=\s*"\w+"[^>]*>\s*.*?\s*</parameter>\s*)+', '', text, flags=re.DOTALL)
-    # Format 15: <tool><tool_name>X</tool_name><json>...</json></tool>
     text = re.sub(r'<tool>\s*<tool_name>\w+</tool_name>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
-    # Format 15b: <tool><tool_name>X</tool_name><json>...</json> (missing </tool>)
     text = re.sub(r'<tool>\s*<tool_name>\w+</tool_name>\s*<json>.*?</json>', '', text, flags=re.DOTALL)
-    # Format 17: <tool><tool_name>X</tool_name><child>v</child>...</tool>
     text = re.sub(r'<tool>\s*<tool_name>\w+</tool_name>(?:\s*<\w+>[^<]*</\w+>\s*)+</tool>', '', text, flags=re.DOTALL)
-    # Format 17b: <tool><tool_name>X</tool_name><child>v</child>... (missing </tool>)
     text = re.sub(r'<tool>\s*<tool_name>\w+</tool_name>(?:\s*<\w+>[^<]*</\w+>\s*)+', '', text, flags=re.DOTALL)
-    # Format 18: <tool><tool_name>X</tool_name><parameter name="Y">v</parameter>...</tool>
     text = re.sub(r'<tool>\s*<tool_name>\w+</tool_name>\s*(?:<parameter\s+name\s*=\s*"\w+"[^>]*>\s*.*?\s*</parameter>\s*)+</tool>', '', text, flags=re.DOTALL)
-    # Format 18b: (missing </tool>)
     text = re.sub(r'<tool>\s*<tool_name>\w+</tool_name>\s*(?:<parameter\s+name\s*=\s*"\w+"[^>]*>\s*.*?\s*</parameter>\s*)+', '', text, flags=re.DOTALL)
-    # Format 19: <tool tool_name="X"><json>...</json></tool>
     text = re.sub(r'<tool\s+tool_name\s*=\s*"\w+"\s*>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
-    # Format 19b: (missing </tool>)
     text = re.sub(r'<tool\s+tool_name\s*=\s*"\w+"\s*>\s*<json>.*?</json>', '', text, flags=re.DOTALL)
-    # Format 20: <tool><tool_name>X</tool_name><input>...</input></tool>
     text = re.sub(r'<tool>\s*<tool_name>\w+</tool_name>\s*<input>.*?</input>\s*</tool>', '', text, flags=re.DOTALL)
-    # Format 20b: (missing </tool>)
     text = re.sub(r'<tool>\s*<tool_name>\w+</tool_name>\s*<input>.*?</input>', '', text, flags=re.DOTALL)
-    # Format 21: <tool><tool_name>X</tool_name><arguments>...</arguments></tool>
     text = re.sub(r'<tool>\s*<tool_name>\w+</tool_name>\s*<arguments>.*?</arguments>\s*</tool>', '', text, flags=re.DOTALL)
-    # Format 21b: (missing </tool>)
     text = re.sub(r'<tool>\s*<tool_name>\w+</tool_name>\s*<arguments>.*?</arguments>', '', text, flags=re.DOTALL)
-    # Format 22: <tool name="X" ... /> (self-closing)
     text = re.sub(r'<tool\s+[^>]+/>', '', text, flags=re.DOTALL)
-    # Format 23: <tool tool_name="X" json='...' /> (self-closing)
     text = re.sub(r"<tool\s+tool_name\s*=\s*\"\w+\"\s+json\s*=\s*'[^']*'\s*/>", '', text, flags=re.DOTALL)
     text = re.sub(r'<tool\s+tool_name\s*=\s*"\w+"\s+json\s*=\s*"[^"]*"\s*/>', '', text, flags=re.DOTALL)
-    # Format 25: <invoke name="X" ... /> (self-closing)
     text = re.sub(r'<invoke\s+[^>]+/>', '', text, flags=re.DOTALL)
-    # Format 26: <tools>...</tools> (multi-tool wrapper)
     text = re.sub(r'<tools>.*?</tools>', '', text, flags=re.DOTALL)
-       # Format 27: [bash]...[/bash]
     text = re.sub(
         r'\[(bash|read|write|edit|AskUserQuestion|UpdatePlan|WebSearch|web_search)\].*?\[/\1\]',
-        '',
-        text,
-        flags=re.DOTALL | re.IGNORECASE
+        '', text, flags=re.DOTALL | re.IGNORECASE
     )
-
-    # Format 27b: [bash]... (missing close)
     text = re.sub(
         r'\[(bash|read|write|edit|AskUserQuestion|UpdatePlan|WebSearch|web_search)\].*$',
-        '',
-        text,
-        flags=re.DOTALL | re.IGNORECASE
+        '', text, flags=re.DOTALL | re.IGNORECASE
     )
-    # [bash] ... [/bash]
     for tname in VALID_TOOLS:
         text = re.sub(
             rf'\[{re.escape(tname)}\].*?\[/{re.escape(tname)}\]',
-            '',
-            text,
-            flags=re.DOTALL | re.IGNORECASE
+            '', text, flags=re.DOTALL | re.IGNORECASE
         )
-
-    # [bash] ...
     for tname in VALID_TOOLS:
         text = re.sub(
             rf'\[{re.escape(tname)}\].*',
-            '',
-            text,
-            flags=re.DOTALL | re.IGNORECASE
+            '', text, flags=re.DOTALL | re.IGNORECASE
         )
-    tool_names = sorted(VALID_TOOLS)  # sync với VALID_TOOLS
+    tool_names = sorted(VALID_TOOLS)
     IGN2 = re.DOTALL | re.IGNORECASE
     for tname in tool_names:
         text = re.sub(rf'<tool>\s*<{tname}>.*?</{tname}>\s*</tool>', '', text, flags=IGN2)
         text = re.sub(rf'<tool>\s*<{tname}>\s*<json>.*?</json>\s*</tool>', '', text, flags=IGN2)
         text = re.sub(rf'<tool>\s*<{tname}>.*?</tool>', '', text, flags=IGN2)
         text = re.sub(rf'<{tname}>.*?</{tname}>', '', text, flags=IGN2)
-    # Format 28: tool: NAME {"key": "val"} (plain text, no XML)
     text = re.sub(r'(?:^|\s)tool\s*:\s*\w+\s*\{.*?\}', '', text, flags=re.DOTALL | re.IGNORECASE)
+
+    # Khôi phục code blocks
+    for i, cb in enumerate(code_blocks):
+        text = text.replace(f'\x00CB{i}\x00', cb)
     return text.strip()
-    text = re.sub(r'<tool>\s*\w+\s*</tool>\s*<json>.*?</json>', '', text, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r'\[json\]\s*\{.*?"tool"\s*:\s*"[^"]*".*?\}', '', text, flags=re.DOTALL | re.IGNORECASE)
 
 
 

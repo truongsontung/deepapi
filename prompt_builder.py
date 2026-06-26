@@ -104,16 +104,16 @@ def build_prompt(messages: list, tools: list = None) -> str:
             content += """
 
             IMPORTANT:
-            If you decide to use a tool, output EXACTLY:
-
-            <tool>TOOL_NAME</tool>
+            ## Available Tools
+            To use a tool, output EXACTLY:
+            <tool>tool_name</tool>
             <json>
-            {"param":"value"}
+            {"param1": "value1"}
             </json>
 
-            Only use valid tool names.
-            Do not invent other formats.
-            If no tool is needed, answer normally.
+            Or nested format:
+            <tool><tool_name><param1>value1</param1></tool_name></tool>
+            If no tool is needed, respond normally in Vietnamese.
             """
             parts.append(f"Human: {content}")
         elif role == "assistant":
