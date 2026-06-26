@@ -4,7 +4,7 @@ DeepSeek API Server - Routes
 
 from flask import Flask, request, Response, jsonify, g
 from config import VALID_API_KEYS, AVAILABLE_MODELS, MODEL_ALIASES, DEBUG_LOG_PATH, DEBUG_LOG_MAX_SIZE, DEBUG_LOG_KEEP, resolve_model
-from token_manager import get_active_token, invalidate_token, get_account_email
+from token_manager import get_active_token, invalidate_token, get_account_email, rotate_account
 from tool_parser import _extract_tool_calls_safe, strip_tool_calls, _validate_tool_calls
 from prompt_builder import build_prompt, _has_xml_tools
 from stream_handler import stream_generator, stream_with_tools
@@ -169,6 +169,7 @@ def chat_completions():
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
 
     try:
+        rotate_account()
         token, email = get_active_token()
     except Exception as e:
         import traceback
@@ -222,10 +223,11 @@ def chat_completions():
                     yield from _yield_text_stream(completion_id, model, tool_error + " " + suffix)
                 elif tool_calls:
                     for i, tc in enumerate(tool_calls):
+                        prefix = suffix if i == 0 else ""
                         cid = "call_" + uuid.uuid4().hex[:12]
-                        yield make_tool_call_chunk(completion_id, model, i, cid, name=tc["name"], account_prefix=suffix)
+                        yield make_tool_call_chunk(completion_id, model, i, cid, name=tc["name"], account_prefix=prefix)
                         args_str = json.dumps(tc["arguments"], ensure_ascii=False)
-                        yield make_tool_call_chunk(completion_id, model, i, "", arguments=args_str, account_prefix=suffix)
+                        yield make_tool_call_chunk(completion_id, model, i, "", arguments=args_str, account_prefix=prefix)
                     yield make_chunk(completion_id, model, {}, finish_reason="tool_calls")
                     yield "data: [DONE]\n\n"
                 else:
@@ -302,10 +304,11 @@ def chat_completions():
                     yield from _yield_text_stream(completion_id, model, tool_error + " " + suffix)
                 elif all_tool_calls:
                     for i, tc in enumerate(all_tool_calls):
+                        prefix = suffix if i == 0 else ""
                         cid = "call_" + uuid.uuid4().hex[:12]
-                        yield make_tool_call_chunk(completion_id, model, i, cid, name=tc["name"], account_prefix=suffix)
+                        yield make_tool_call_chunk(completion_id, model, i, cid, name=tc["name"], account_prefix=prefix)
                         args_str = json.dumps(tc["arguments"], ensure_ascii=False)
-                        yield make_tool_call_chunk(completion_id, model, i, "", arguments=args_str, account_prefix=suffix)
+                        yield make_tool_call_chunk(completion_id, model, i, "", arguments=args_str, account_prefix=prefix)
                     yield make_chunk(completion_id, model, {}, finish_reason="tool_calls")
                     yield "data: [DONE]\n\n"
                 else:

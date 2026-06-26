@@ -44,6 +44,15 @@ def _token_refresh_loop():
         print("[auth] Token refresh complete")
 
 
+def rotate_account():
+    """Chuyển sang tài khoản tiếp theo trong vòng tròn.
+    Gọi trước mỗi request để phân tải đều giữa các accounts."""
+    global _current_account_index
+    with _account_lock:
+        _current_account_index = (_current_account_index + 1) % len(ACCOUNTS)
+        print(f"[auth] Rotate to account #{_current_account_index + 1}: {ACCOUNTS[_current_account_index].get('email')}")
+
+
 def get_active_token(force_refresh: bool = False) -> tuple[str, str]:
     """Returns (token, account_email). Rotates to next account only on force_refresh or failure."""
     global _current_account_index
