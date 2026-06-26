@@ -1,24 +1,44 @@
 # DeepAPI — OpenAI-Compatible API Bridge for DeepSeek
 
-DeepAPI cung cấp REST API tương thích OpenAI, cho phép gọi DeepSeek Chat thông qua giao diện chuẩn `/v1/chat/completions`. Hỗ trợ **tool calling** (function calling) qua XML parsing.
+> **⚠️ TUYÊN BỐ MIỄN TRỪ TRÁCH NHIỆM**
+>
+> Dự án này chỉ phục vụ **mục đích nghiên cứu, học tập và thử nghiệm cá nhân**.
+> Người dùng chịu hoàn toàn trách nhiệm khi sử dụng. Không được dùng cho mục đích
+> thương mại hoặc vi phạm điều khoản dịch vụ của bên thứ ba.
+
+---
+
+## Giới thiệu
+
+DeepAPI là REST API bridge tương thích OpenAI, cho phép gọi DeepSeek Chat thông qua
+giao diện chuẩn `/v1/chat/completions`. Hỗ trợ **tool calling** (function calling)
+qua XML parsing, streaming, multi-account, và tự động xoay vòng tài khoản.
+
+Dự án được phát triển dựa trên:
+- [deepcode-cli](https://github.com/lessweb/deepcode-cli.git) — CLI client cho DeepSeek
+- [deepapi](https://github.com/taitestgame/deepapi.git) — API bridge gốc
 
 ## Tính năng
 
 - ✅ API tương thích OpenAI (`/v1/models`, `/v1/chat/completions`)
-- ✅ **Tool Calling** — parse XML tool calls từ model output (4 định dạng)
+- ✅ **Tool Calling** — parse XML tool calls từ model output (28+ định dạng)
 - ✅ Streaming & Non-streaming SSE
-- ✅ Multi-account rotation (xoay vòng tài khoản)
-- ✅ Auto-continue khi response dài
+- ✅ Multi-account round-robin (xoay vòng sau mỗi request)
+- ✅ Tự động refresh token (10 phút / lần)
+- ✅ Auto-continue khi response dài (tối đa 8 vòng)
 - ✅ PoW solver qua cloakbrowser (Chromium headless)
-- ✅ Hỗ trợ model: deepseek-v4-flash, deepseek-v4-pro, deepseek-chat, deepseek-reasoner...
+- ✅ Hỗ trợ model: deepseek-v4-flash, deepseek-v4-pro, deepseek-chat, deepseek-reasoner
+- ✅ Tự động inject tool descriptions vào system prompt
+- ✅ Strip tool call XML khỏi text response (giữ nguyên code blocks)
+
+## Yêu cầu
+
+- **Python** 3.12+
+- **Node.js** 24+
+- **Ubuntu 24.04** (hoặc Linux tương tự)
+- **Playwright / Chromium** (cho PoW solver)
 
 ## Cài đặt
-
-### Yêu cầu
-
-- Python 3.12+
-- Node.js 24+
-- Ubuntu 24.04 (hoặc Linux tương tự)
 
 ### 1. Cài dependencies
 
@@ -35,7 +55,7 @@ npx playwright install chromium
 
 ### 2. Cấu hình tài khoản
 
-Tạo file `.env`:
+Tạo file `.env` trong thư mục dự án:
 
 ```ini
 # Tài khoản DeepSeek (email:password, phân cách bằng dấu phẩy)
@@ -79,14 +99,16 @@ sudo systemctl enable --now deepapi
 
 ## Sử dụng
 
-### Gọi API
+### Liệt kê models
 
 ```bash
-# Liệt kê models
 curl http://localhost:5001/v1/models \
   -H "Authorization: Bearer deepcode2026"
+```
 
-# Chat completion
+### Chat completion (stream)
+
+```bash
 curl http://localhost:5001/v1/chat/completions \
   -H "Authorization: Bearer deepcode2026" \
   -H "Content-Type: application/json" \
@@ -95,8 +117,24 @@ curl http://localhost:5001/v1/chat/completions \
     "stream": true,
     "messages": [{"role": "user", "content": "Xin chào"}]
   }'
+```
 
-# Tool calling
+### Chat completion (non-stream)
+
+```bash
+curl http://localhost:5001/v1/chat/completions \
+  -H "Authorization: Bearer deepcode2026" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-v4-pro",
+    "stream": false,
+    "messages": [{"role": "user", "content": "1+1=?"}]
+  }'
+```
+
+### Tool calling (OpenAI format)
+
+```bash
 curl http://localhost:5001/v1/chat/completions \
   -H "Authorization: Bearer deepcode2026" \
   -H "Content-Type: application/json" \
@@ -122,9 +160,9 @@ curl http://localhost:5001/v1/chat/completions \
   }'
 ```
 
-### Cấu hình DeepCode CLI
+### Cấu hình OpenCode / DeepCode CLI
 
-Trong `~/.deepcode/settings.json`:
+Trong `~/.config/opencode/config.json` hoặc `~/.deepcode/settings.json`:
 
 ```json
 {
@@ -142,28 +180,105 @@ Trong `~/.deepcode/settings.json`:
 
 ```
 Client → POST /v1/chat/completions (OpenAI format)
-    → server.py: auth → build_prompt (inject tools) → call DeepSeek
+    → server.py: auth → rotate account → build_prompt → call DeepSeek
     → deepseek_client.py: cloakbrowser → fetch() DeepSeek API
     → parse_sse_lines() → tách text, thinking, tool calls
+    → tool_parser.py: parse XML tool calls (28+ formats)
     → Nếu có XML tool calls → convert sang OpenAI tool_calls format
     → Response: SSE stream hoặc JSON
 ```
 
+### Account rotation
+
+```
+Mỗi request:
+  1. rotate_account() → tăng index (vòng tròn)
+  2. get_active_token() → lấy token của account đó
+  3. Xử lý request với account cố định (kể cả auto-continue + tool call)
+
+Khi lỗi:
+  - invalidate_token() → đánh dấu token hỏng
+  - get_active_token(force_refresh=True) → login lại hoặc chuyển account kế
+
+Refresh định kỳ:
+  - Thread nền login lại tất cả accounts mỗi 600 giây
+```
+
 ## Tool Calling
 
-Server hỗ trợ 4 định dạng XML tool calls từ model output:
+Server hỗ trợ **28+ định dạng XML** tool calls từ model output. Các định dạng chính:
 
-1. `<function_call name="w"><args>{json}</args></function_call>`
-2. `<write><file_path>...</file_path><content>...</content></write>`
-3. `<tool_calls><invoke name="..."><parameter>...</parameter></invoke></tool_calls>`
-4. `<function_call name="read"><file_path>...</file_path></function_call>`
+| Format | Ví dụ |
+|--------|-------|
+| Format 1 (chuẩn) | `<tool>bash</tool><json>{"command":"ls"}</json>` |
+| Format 2 (legacy) | `<function_call name="bash"><args>{"command":"ls"}</args></function_call>` |
+| Format 3 (CodeAI) | `<tool><name>bash</name><parameter name="command" string="true">ls</parameter></tool>` |
+| Format 4 (bare) | `<bash>ls</bash>` |
+| Format 6 (nested) | `<tool><bash><json>{"command":"ls"}</json></bash></tool>` |
+| Format 10 | `<tool><tool_call>bash</tool_call><json>{"command":"ls"}</json></tool>` |
+| Format 12 (raw JSON) | `<tool>{"name":"bash","command":"ls"}</tool>` |
+| Format 26 (multi) | `<tools><tool>bash</tool><json>{"cmd":"ls"}</json>...</tools>` |
+| Format 27 (bracket) | `[bash] ls [/bash]` |
+| Format 28 (plain) | `tool: bash {"command":"ls"}` |
 
-Server tự động inject tool descriptions vào system prompt để model biết output XML.
+Server inject tool descriptions vào system prompt và parse XML từ response.
+Nếu model output chứa tool call XML không hợp lệ, server gửi lỗi text về để
+model tự sửa.
+
+## Cấu trúc thư mục
+
+```
+deepapi/
+├── server.py              # Entry point (Flask app)
+├── config.py              # Config: accounts, models, API keys
+├── routes.py              # API routes + request handling
+├── token_manager.py       # Multi-account rotation + token management
+├── deepseek_client.py     # DeepSeek API client (PoW, SSE, session)
+├── sse_handler.py         # SSE chunk builders
+├── stream_handler.py      # Stream generators (auto-continue, retry)
+├── tool_parser.py         # XML tool call parser (28+ formats)
+├── prompt_builder.py      # System prompt builder + tool injection
+├── .env                   # Environment variables (accounts, keys)
+├── requirements.txt       # Python dependencies
+├── tests/                 # Unit tests
+└── README.md              # This file
+```
 
 ## Quản lý
 
 ```bash
-sudo systemctl status deepapi   # Xem trạng thái
-sudo systemctl restart deepapi  # Khởi động lại
-journalctl -u deepapi -f        # Xem logs
+# Systemd
+sudo systemctl status deepapi      # Xem trạng thái
+sudo systemctl restart deepapi     # Khởi động lại
+sudo systemctl stop deepapi        # Dừng
+
+# Logs
+journalctl -u deepapi -f           # Xem logs realtime
+journalctl -u deepapi --since "5 minutes ago"  # Logs 5 phút gần nhất
+
+# Kiểm tra debug
+curl http://localhost:5001/v1/models -H "Authorization: Bearer deepcode2026"
 ```
+
+## Development
+
+```bash
+# Chạy test
+python3 -c "import sys; sys.path.insert(0, '.'); exec(open('tests/...').read())"
+
+# Kiểm tra syntax
+python3 -c "import py_compile; py_compile.compile('tool_parser.py', doraise=True)"
+
+# Debug account rotation
+export DEBUG_AUTH=1
+python3 server.py
+```
+
+## License
+
+Dự án này chỉ dành cho **mục đích nghiên cứu và học tập**.
+
+## Credits
+
+- [deepcode-cli](https://github.com/lessweb/deepcode-cli.git) — CLI client cho DeepSeek
+- [deepapi](https://github.com/taitestgame/deepapi.git) — API bridge gốc
