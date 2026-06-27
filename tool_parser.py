@@ -27,6 +27,8 @@ def _extract_xml_tags(text: str) -> list:  # modified again
     8. <tool><tool_name name="X">X</tool_name><json>{...}</json></tool>
     9. <invoke name="X"><parameter>...</parameter></invoke>
     10. <tool><invoke name="X"><parameter>...</parameter></invoke></tool> (trip)
+    10d. <tool><tool_call name="X"><child>value</child>...</tool_call></tool> (direct children)
+    10e. same as 10d but missing closing </tool> (lax)
     11. <tool><tool_name>X</tool_name><child>v</child>...</tool> (direct child params)
     12. <tool><tool_name>X</tool_name><parameter name="Y">v</parameter></tool>
     13. <tool tool_name="X"><json>{...}</json></tool> (tool_name as attribute)
@@ -464,6 +466,51 @@ def _extract_xml_tags(text: str) -> list:  # modified again
     if tools:
         return tools
 
+
+    # Format 10d: <tool><tool_call name="X"><child>value</child>...</tool_call></tool>
+    # Direct child tags inside tool_call, with closing </tool>
+    tool_call_direct_pattern = re.compile(
+        r'<tool>\s*<tool_call\s+name\s*=\s*"(\w+)"\s*>(.*?)</tool_call>\s*</tool>',
+        re.DOTALL | re.IGNORECASE
+    )
+    for match in tool_call_direct_pattern.finditer(text):
+        tool_name = match.group(1)
+        inner = match.group(2)
+        args = {}
+        child_pattern = re.compile(r'<(\w+)>\s*(.*?)\s*</\1>', re.DOTALL)
+        for cm in child_pattern.finditer(inner):
+            key = cm.group(1).lower()
+            val = cm.group(2).strip()
+            try:
+                val = json.loads(val)
+            except (json.JSONDecodeError, ValueError):
+                pass
+            args[key] = val
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
+    # Format 10e: same as 10d but missing closing </tool> (lax)
+    tool_call_direct_no_close_pattern = re.compile(
+        r'<tool>\s*<tool_call\s+name\s*=\s*"(\w+)"\s*>(.*?)</tool_call>',
+        re.DOTALL | re.IGNORECASE
+    )
+    for match in tool_call_direct_no_close_pattern.finditer(text):
+        tool_name = match.group(1)
+        inner = match.group(2)
+        args = {}
+        child_pattern = re.compile(r'<(\w+)>\s*(.*?)\s*</\1>', re.DOTALL)
+        for cm in child_pattern.finditer(inner):
+            key = cm.group(1).lower()
+            val = cm.group(2).strip()
+            try:
+                val = json.loads(val)
+            except (json.JSONDecodeError, ValueError):
+                pass
+            args[key] = val
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
 
     # Format 10b: <tool><tool_call name="NAME"><parameter name="KEY" string="true/false">value</parameter>...</tool_call></tool>
     tool_call_attr_param_pattern = re.compile(
