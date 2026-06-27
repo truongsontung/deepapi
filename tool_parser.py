@@ -36,6 +36,8 @@ def _extract_xml_tags(text: str) -> list:  # modified again
     17. <tool tool_name="X" json='{...}' /> (self-closing attrs)
     18. <invoke name="X" ... /> (invoke self-closing)
     19. <tools><tool>...</tool>...</tools> (multi-tool wrapper)
+    20. <tool><name="tool"><parameter name="KEY">value</parameter>...</tool> (malformed name attr)
+    21. <tool><name="tool</name><json><parameter>...</parameter>...</json></tool> (malformed name + json wrapper)
     """
     # Strip markdown code blocks: XML trong ``` ... ``` là ví dụ, không phải tool call thật
     text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)
@@ -212,6 +214,68 @@ def _extract_xml_tags(text: str) -> list:  # modified again
                 except (json.JSONDecodeError, ValueError):
                     pass
             args[pname] = pvalue
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
+
+    # Format 3b: <tool><name="tool"><parameter name="KEY">value</parameter>...</tool>
+    # Handle model errors where <name>X</name> becomes <name="X"> (attribute-style name)
+    tool_block_name_attr = re.compile(
+        r'<tool>\s*<name\s*=\s*"(\w+)"[^>]*>\s*(.*?)\s*</tool>',
+        re.DOTALL | re.IGNORECASE
+    )
+    for match in tool_block_name_attr.finditer(text):
+        tool_name = match.group(1)
+        params_block = match.group(2)
+        args = {}
+        param_pattern = re.compile(
+            r'<parameter\s+name\s*=\s*"(\w+)"[^>]*>\s*(.*?)\s*</parameter>',
+            re.DOTALL | re.IGNORECASE
+        )
+        for pm in param_pattern.finditer(params_block):
+            pname = pm.group(1)
+            pvalue = pm.group(2).strip()
+            type_match = re.search(r'string\s*=\s*"(true|false)"', pm.group(0))
+            if type_match and type_match.group(1) == "false":
+                try:
+                    pvalue = json.loads(pvalue)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            args[pname] = pvalue
+        tools.append({"name": tool_name, "arguments": args})
+    if tools:
+        return tools
+
+
+    # Format 3c: <tool><name="tool</name><json>...params...</json></tool>
+    # Handle model errors where <name>X</name> becomes <name="X</name>
+    # and params are wrapped in <json> instead of direct children
+    name_attr_json_pattern = re.compile(
+        r'<tool>\s*<name\s*=\s*"(\w+)[^>]*</name>\s*<json>\s*(.*?)\s*</json>\s*</tool>',
+        re.DOTALL | re.IGNORECASE
+    )
+    for match in name_attr_json_pattern.finditer(text):
+        tool_name = match.group(1)
+        json_block = match.group(2)
+        try:
+            args = json.loads(json_block)
+        except json.JSONDecodeError:
+            args = {}
+            param_pattern = re.compile(
+                r'<parameter\s+name\s*=\s*"(\w+)"[^>]*>\s*(.*?)\s*</parameter>',
+                re.DOTALL | re.IGNORECASE
+            )
+            for pm in param_pattern.finditer(json_block):
+                pname = pm.group(1)
+                pvalue = pm.group(2).strip()
+                type_match = re.search(r'string\s*=\s*"(true|false)"', pm.group(0))
+                if type_match and type_match.group(1) == "false":
+                    try:
+                        pvalue = json.loads(pvalue)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                args[pname] = pvalue
         tools.append({"name": tool_name, "arguments": args})
     if tools:
         return tools
@@ -1324,6 +1388,8 @@ def strip_tool_calls(text: str) -> str:
     text = re.sub(r'<function_call\s+name\s*=\s*"[^"]*"\s*>.*?</function_call>', '', text, flags=re.DOTALL)
     text = re.sub(r'<function_call\s+name\s*=\s*"[^"]*"\s*>\s*<args>.*?</args>', '', text, flags=re.DOTALL)
     text = re.sub(r'<tool>\s*<name>\w+</name>.*?</tool>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<tool>\s*<name\s*=\s*"\w+"[^>]*>.*?</tool>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<tool>\s*<name\s*=\s*"\w+</name>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
     text = re.sub(r'<tool>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
     text = re.sub(r'<tool>\s*(<parameter\s+name\s*=\s*"\w+"[^>]*>\s*.*?\s*</parameter>\s*)+</tool>', '', text, flags=re.DOTALL)
     text = re.sub(r'<tool>\s*<tool_call>\w+</tool_call>\s*<json>.*?</json>\s*</tool>', '', text, flags=re.DOTALL)
