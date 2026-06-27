@@ -114,6 +114,7 @@ def build_prompt(messages: list, tools: list = None) -> str:
             Or nested format:
             <tool><tool_name><param1>value1</param1></tool_name></tool>
             If no tool is needed, respond normally in Vietnamese.
+            Tool calls must be sent in the response to the user, not written in thinking.
             """
             parts.append(f"Human: {content}")
         elif role == "assistant":
