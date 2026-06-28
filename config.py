@@ -107,11 +107,21 @@ VALID_TOOLS = {
     'read',
     'write',
     'edit',
+    'glob',
+    'grep',
+    'task',
+    'skill',
+    'lsp',
+    'todowrite',
+    'webfetch',
+    'websearch',
+    'apply_patch',
+    'ask',
     'AskUserQuestion',
     'UpdatePlan',
     'WebSearch',
-    'web_search',  # alias lowercase (XML parser dùng)
-    'python',      # hỗ trợ [python] bracket
+    'web_search',
+    'python',
 }
 
 # ── Debug Logging ──

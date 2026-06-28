@@ -713,7 +713,7 @@ def extract_content_recursive(items: list, default_type: str):
             continue
         if item_path in ("response/status", "status"):
             if isinstance(item_v, str) and item_v.upper() == "FINISHED":
-                return [], True
+                finished = True
             continue
         if item_path in ("response/search_status", "quasi_status", "elapsed_secs", "pending_fragment", "conversation_mode"):
             continue
