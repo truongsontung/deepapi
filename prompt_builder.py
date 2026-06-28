@@ -12,6 +12,66 @@ XML_TOOL_INSTRUCTION = (
     "\n**WARNING: Do NOT output tool names copied from code examples you read (like 'name', 'NAME', 'N', 'X', 'tool_name', 'TÊN'). "
     "Only use tools from the Valid tools list above. If you need to explain code, use plain text, NOT tool calls.**"
 )
+def _build_example_args(func: dict) -> dict:
+    params = func.get("parameters", {}).get("properties", {})
+    required = func.get("parameters", {}).get("required", [])
+    args = {}
+    for pname, pinfo in params.items():
+        ptype = pinfo.get("type", "string")
+        enum = pinfo.get("enum", [])
+        if ptype == "array":
+            items = pinfo.get("items", {})
+            item_props = items.get("properties", {})
+            if item_props:
+                item_required = items.get("required", [])
+                ex = {}
+                for ipname, ipinfo in item_props.items():
+                    ienum = ipinfo.get("enum", [])
+                    if ipname in item_required:
+                        ex[ipname] = (ienum or [ipinfo.get("description", "...")])[0]
+                    else:
+                        ex[ipname] = "..."
+                args[pname] = [ex]
+            else:
+                args[pname] = []
+        elif ptype == "object":
+            obj_props = pinfo.get("properties", {})
+            if obj_props:
+                args[pname] = {k: v.get("description", "...") for k, v in obj_props.items()}
+            else:
+                args[pname] = {}
+        elif pname in required:
+            args[pname] = (enum or [pinfo.get("description", "...")])[0]
+        else:
+            args[pname] = "..."
+    return args
+
+def _describe_param(pname: str, pinfo: dict, required: set, indent: int = 2) -> list:
+    prefix = " " * indent
+    lines = []
+    ptype = pinfo.get("type", "string")
+    enum = pinfo.get("enum", [])
+    req_mark = " (required)" if pname in required else ""
+    pdesc = pinfo.get("description", "")
+    type_hint = f" [{ptype}]" if not enum else f" [{ptype}, enum: {'|'.join(enum)}]"
+    lines.append(f"{prefix}- {pname}:{type_hint} {pdesc}{req_mark}")
+    if ptype == "array":
+        items = pinfo.get("items", {})
+        item_props = items.get("properties", {})
+        if item_props:
+            item_required = set(items.get("required", []))
+            lines.append(f"{prefix}  items:")
+            for ipname, ipinfo in item_props.items():
+                lines.extend(_describe_param(ipname, ipinfo, item_required, indent + 4))
+    elif ptype == "object":
+        obj_props = pinfo.get("properties", {})
+        if obj_props:
+            obj_required = set(pinfo.get("required", []))
+            lines.append(f"{prefix}  properties:")
+            for opname, opinfo in obj_props.items():
+                lines.extend(_describe_param(opname, opinfo, obj_required, indent + 4))
+    return lines
+
 def _build_tool_system_prompt(tools: list) -> str:
     """Build system prompt fragment describing available tools in XML format."""
     if not tools:
@@ -19,11 +79,22 @@ def _build_tool_system_prompt(tools: list) -> str:
 
     lines = ["## Available Tools"]
     lines.append("To use a tool, output EXACTLY:")
-    lines.append("<tool>tool_name</tool>")
+
+    first = tools[0].get("function", {})
+    example_name = first.get("name", "tool_name")
+    example_args = _build_example_args(first)
+    lines.append(f"<tool>{example_name}</tool>")
     lines.append("<json>")
-    lines.append('{"param1": "value1"}')
+    lines.append(json.dumps(example_args, indent=2, ensure_ascii=False))
     lines.append("</json>")
-    lines.append("Or nested format: <tool><tool_name><param1>value1</param1></tool_name></tool>")
+    if example_args:
+        flat = []
+        for k, v in example_args.items():
+            if isinstance(v, (list, dict)):
+                flat.append(f"<{k}>...</{k}>")
+            else:
+                flat.append(f"<{k}>{v}</{k}>")
+        lines.append(f"Or: <tool>{example_name}</tool>{''.join(flat)}")
     lines.append("")
     lines.append("CRITICAL: Only use tools listed below. Any other tool name will cause an error.")
     lines.append("Valid tool names: " + ", ".join(sorted(VALID_TOOLS)))
@@ -39,21 +110,19 @@ def _build_tool_system_prompt(tools: list) -> str:
         name = func.get("name", "unknown")
         desc = func.get("description", "")
         params = func.get("parameters", {}).get("properties", {})
-        required = func.get("parameters", {}).get("required", [])
+        required = set(func.get("parameters", {}).get("required", []))
 
         lines.append(f"\n### {name}")
         lines.append(f"Description: {desc}")
         if params:
             lines.append("Parameters:")
             for pname, pinfo in params.items():
-                req_mark = " (required)" if pname in required else ""
-                pdesc = pinfo.get("description", "")
-                lines.append(f"  - {pname}: {pdesc}{req_mark}")
+                lines.extend(_describe_param(pname, pinfo, required))
 
     return "\n".join(lines)
 
 def _has_xml_tools(messages: list) -> bool:
-    xml_tool_pattern = re.compile(r'<(write|bash|read|edit|AskUserQuestion|WebSearch|UpdatePlan)>', re.IGNORECASE)
+    xml_tool_pattern = re.compile(r'<(write|bash|read|edit|glob|grep|task|todowrite|webfetch|websearch|ask|AskUserQuestion|WebSearch|UpdatePlan)>', re.IGNORECASE)
     for msg in messages:
         if msg.get('role') == 'system':
             content = msg.get('content', '')
@@ -101,18 +170,26 @@ def build_prompt(messages: list, tools: list = None) -> str:
         #elif role == "user":
            # parts.append(f"Human: {content}")
         elif role == "user":
-            content += """
+            if has_explicit_tools and tools:
+                ex_func = tools[0].get("function", {})
+                ex_name = ex_func.get("name", "tool_name")
+                ex_args = _build_example_args(ex_func)
+                ex_json = json.dumps(ex_args, indent=2, ensure_ascii=False)
+            else:
+                ex_name = "tool_name"
+                ex_json = '{"param1": "value1"}'
+            content += f"""
 
             IMPORTANT:
             ## Available Tools
             To use a tool, output EXACTLY:
-            <tool>tool_name</tool>
+            <tool>{ex_name}</tool>
             <json>
-            {"param1": "value1"}
+            {ex_json}
             </json>
 
             Or nested format:
-            <tool><tool_name><param1>value1</param1></tool_name></tool>
+            <tool><{ex_name}>value</{ex_name}></tool>
             If no tool is needed, respond normally in Vietnamese.
             Tool calls must be sent in the response to the user, not written in thinking.
             """
